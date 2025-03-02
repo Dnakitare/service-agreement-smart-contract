@@ -1,5 +1,5 @@
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { ethers, upgrades } = require("hardhat");
 const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
 describe("ServiceAgreement", function () {
@@ -13,6 +13,9 @@ describe("ServiceAgreement", function () {
     let addrs;
 
     const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+    const oneDay = 24 * 60 * 60;
+    const oneWeek = 7 * oneDay;
+    const oneMonth = 30 * oneDay;
 
     beforeEach(async function () {
         // Get signers
@@ -24,10 +27,10 @@ describe("ServiceAgreement", function () {
 
         // Deploy ServiceAgreement contract
         const ServiceAgreement = await ethers.getContractFactory("ServiceAgreement");
-        serviceAgreement = await ServiceAgreement.deploy(
+        serviceAgreement = await upgrades.deployProxy(ServiceAgreement, [
             arbitrator.address,
             feeCollector.address
-        );
+        ]);
 
         // Add token to whitelist
         await serviceAgreement.addWhitelistedToken(await mockToken.getAddress());
@@ -36,6 +39,23 @@ describe("ServiceAgreement", function () {
         const mintAmount = ethers.parseEther("1000");
         await mockToken.mint(client.address, mintAmount);
         await mockToken.connect(client).approve(serviceAgreement.getAddress(), mintAmount);
+
+        // Wait for timelock to pass
+        await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60]); // 3 days
+        await ethers.provider.send("evm_mine");
+        
+        // Execute the whitelisting action
+        const actionId = ethers.utils.keccak256(
+            ethers.utils.solidityPack(
+                ["bytes32", "bytes", "uint256"],
+                [
+                    await serviceAgreement.ACTION_WHITELIST_TOKEN(),
+                    ethers.utils.defaultAbiCoder.encode(["address"], [await mockToken.getAddress()]),
+                    (await ethers.provider.getBlock("latest")).timestamp - 3 * 24 * 60 * 60
+                ]
+            )
+        );
+        await serviceAgreement.executeAction(actionId);
     });
 
     describe("Deployment", function () {
@@ -364,225 +384,6 @@ describe("ServiceAgreement", function () {
   });
 
   describe("Template Management", function () {
-        const templateName = "Basic Agreement";
-        const templateTerms = "Standard terms for basic service agreement";
-        const recommendedDuration = 30 * 24 * 60 * 60; // 30 days
-        const recommendedMilestones = 3;
-
-        it("Should create template", async function () {
-            await expect(
-                serviceAgreement.connect(owner).createTemplate(
-                    templateName,
-                    templateTerms,
-                    recommendedDuration,
-                    recommendedMilestones
-                )
-            )
-                .to.emit(serviceAgreement, "TemplateCreated")
-                .withArgs(0, templateName);
-
-            const template = await serviceAgreement.templates(0);
-            expect(template.name).to.equal(templateName);
-            expect(template.terms).to.equal(templateTerms);
-            expect(template.recommendedDuration).to.equal(recommendedDuration);
-            expect(template.recommendedMilestones).to.equal(recommendedMilestones);
-            expect(template.active).to.be.true;
-        });
-
-        it("Should update template", async function () {
-            // Create template first
-            await serviceAgreement.connect(owner).createTemplate(
-                templateName,
-                templateTerms,
-                recommendedDuration,
-                recommendedMilestones
-            );
-
-            const newName = "Updated Template";
-            const newTerms = "Updated terms";
-            
-            await expect(
-                serviceAgreement.connect(owner).updateTemplate(
-                    0,
-                    newName,
-                    newTerms,
-                    recommendedDuration,
-                    recommendedMilestones,
-                    true
-                )
-            )
-                .to.emit(serviceAgreement, "TemplateUpdated")
-                .withArgs(0, newName, true);
-
-            const template = await serviceAgreement.templates(0);
-            expect(template.name).to.equal(newName);
-            expect(template.terms).to.equal(newTerms);
-        });
-    });
-
-    describe("Emergency Functions", function () {
-        it("Should allow emergency withdrawal of ETH", async function () {
-            // Send some ETH to contract first
-            await owner.sendTransaction({
-                to: serviceAgreement.getAddress(),
-                value: ethers.parseEther("1")
-            });
-
-            const balanceBefore = await ethers.provider.getBalance(owner.address);
-            await serviceAgreement.connect(owner).emergencyWithdraw(ZERO_ADDRESS);
-            const balanceAfter = await ethers.provider.getBalance(owner.address);
-
-            expect(balanceAfter).to.be.gt(balanceBefore);
-            expect(
-                await ethers.provider.getBalance(serviceAgreement.getAddress())
-            ).to.equal(0);
-        });
-
-        it("Should allow emergency withdrawal of tokens", async function () {
-            const tokenAddress = await mockToken.getAddress();
-            const amount = ethers.parseEther("100");
-
-            // Send tokens to contract first
-            await mockToken.transfer(serviceAgreement.getAddress(), amount);
-
-            await expect(
-                serviceAgreement.connect(owner).emergencyWithdraw(tokenAddress)
-            ).to.changeTokenBalances(
-                mockToken,
-                [serviceAgreement.getAddress(), owner.address],
-                [-amount, amount]
-            );
-        });
-    });
-
-    describe("Milestone Deadline Management", function () {
-        let agreementId;
-
-        beforeEach(async function () {
-            await serviceAgreement.connect(client).createAgreementFromTemplate(
-                0,
-                provider.address,
-                [Math.floor(Date.now() / 1000) + 86400],
-                [ethers.parseEther("1")],
-                ZERO_ADDRESS,
-                { value: ethers.parseEther("1") }
-            );
-            agreementId = 0;
-        });
-
-        it("Should extend milestone deadline", async function () {
-            const newDeadline = Math.floor(Date.now() / 1000) + (2 * 86400); // 2 days from now
-
-            await expect(
-                serviceAgreement.connect(client).extendMilestoneDeadline(
-                    agreementId,
-                    0,
-                    newDeadline
-                )
-            )
-                .to.emit(serviceAgreement, "MilestoneDeadlineExtended")
-                .withArgs(agreementId, 0, newDeadline);
-
-            const milestone = await serviceAgreement.getMilestoneDetails(agreementId, 0);
-            expect(milestone.deadline).to.equal(newDeadline);
-        });
-    });
-
-    describe("Agreement Cancellation", function () {
-        let agreementId;
-
-        beforeEach(async function () {
-            await serviceAgreement.connect(client).createAgreementFromTemplate(
-                0,
-                provider.address,
-                [Math.floor(Date.now() / 1000) + 86400],
-                [ethers.parseEther("1")],
-                ZERO_ADDRESS,
-                { value: ethers.parseEther("1") }
-            );
-            agreementId = 0;
-        });
-
-        it("Should allow client to cancel agreement within timeframe", async function () {
-            const reason = "Project requirements changed";
-            
-            await expect(
-                serviceAgreement.connect(client).cancelAgreement(agreementId, reason)
-            )
-                .to.emit(serviceAgreement, "AgreementCancelled")
-                .withArgs(agreementId, client.address, reason);
-
-            const agreement = await serviceAgreement.getAgreementDetails(agreementId);
-            expect(agreement.cancelled).to.be.true;
-        });
-
-        it("Should refund remaining amount on cancellation", async function () {
-            const clientBalanceBefore = await ethers.provider.getBalance(client.address);
-
-            await serviceAgreement.connect(client).cancelAgreement(
-                agreementId,
-                "Cancellation test"
-            );
-
-            const clientBalanceAfter = await ethers.provider.getBalance(client.address);
-            expect(clientBalanceAfter).to.be.gt(clientBalanceBefore);
-        });
-    });
-
-    describe("Batch View Functions", function () {
-        let agreementId;
-        const milestoneDueDates = [
-            Math.floor(Date.now() / 1000) + 86400,
-            Math.floor(Date.now() / 1000) + 172800
-        ];
-        const milestoneAmounts = [
-            ethers.parseEther("0.5"),
-            ethers.parseEther("0.5")
-        ];
-
-        beforeEach(async function () {
-            await serviceAgreement.connect(client).createAgreementFromTemplate(
-                0,
-                provider.address,
-                milestoneDueDates,
-                milestoneAmounts,
-                ZERO_ADDRESS,
-                { value: ethers.parseEther("1") }
-            );
-            agreementId = 0;
-        });
-
-        it("Should get all milestones in single call", async function () {
-            const [
-                deadlines,
-                amounts,
-                completedStates,
-                paidStates,
-                evidenceHashes
-            ] = await serviceAgreement.getMilestones(agreementId);
-
-            expect(deadlines.length).to.equal(2);
-            expect(amounts.length).to.equal(2);
-            expect(completedStates.length).to.equal(2);
-            expect(paidStates.length).to.equal(2);
-            expect(evidenceHashes.length).to.equal(2);
-
-            expect(deadlines[0]).to.equal(milestoneDueDates[0]);
-            expect(amounts[0]).to.equal(milestoneAmounts[0]);
-        });
-
-        it("Should get user agreements", async function () {
-            const clientAgreements = await serviceAgreement.getUserAgreements(client.address);
-            const providerAgreements = await serviceAgreement.getUserAgreements(provider.address);
-
-            expect(clientAgreements.length).to.equal(1);
-            expect(providerAgreements.length).to.equal(1);
-            expect(clientAgreements[0]).to.equal(agreementId);
-            expect(providerAgreements[0]).to.equal(agreementId);
-        });
-    });
-  
-    describe("Template Management", function () {
         const templateName = "Basic Agreement";
         const templateTerms = "Standard terms for basic service agreement";
         const recommendedDuration = 30 * 24 * 60 * 60; // 30 days
