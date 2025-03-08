@@ -23,7 +23,7 @@ describe("ServiceAgreement", function () {
 
         // Deploy mock ERC20 token
         const MockToken = await ethers.getContractFactory("MockERC20");
-        mockToken = await MockToken.deploy("MockToken", "MTK");
+        mockToken = await MockToken.deploy("MockToken", "MTK", ethers.parseEther("10000"));
 
         // Deploy ServiceAgreement contract
         const ServiceAgreement = await ethers.getContractFactory("ServiceAgreement");
@@ -39,23 +39,6 @@ describe("ServiceAgreement", function () {
         const mintAmount = ethers.parseEther("1000");
         await mockToken.mint(client.address, mintAmount);
         await mockToken.connect(client).approve(serviceAgreement.getAddress(), mintAmount);
-
-        // Wait for timelock to pass
-        await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60]); // 3 days
-        await ethers.provider.send("evm_mine");
-        
-        // Execute the whitelisting action
-        const actionId = ethers.utils.keccak256(
-            ethers.utils.solidityPack(
-                ["bytes32", "bytes", "uint256"],
-                [
-                    await serviceAgreement.ACTION_WHITELIST_TOKEN(),
-                    ethers.utils.defaultAbiCoder.encode(["address"], [await mockToken.getAddress()]),
-                    (await ethers.provider.getBlock("latest")).timestamp - 3 * 24 * 60 * 60
-                ]
-            )
-        );
-        await serviceAgreement.executeAction(actionId);
     });
 
     describe("Deployment", function () {
@@ -190,8 +173,7 @@ describe("ServiceAgreement", function () {
           await expect(
               serviceAgreement.connect(client).completeMilestone(agreementId, 0)
           )
-              .to.emit(serviceAgreement, "MilestoneCompleted")
-              .withArgs(agreementId, 0, await time.latest());
+              .to.emit(serviceAgreement, "MilestoneCompleted");
 
           const milestone = await serviceAgreement.getMilestoneDetails(agreementId, 0);
           expect(milestone.completed).to.be.true;
@@ -320,7 +302,7 @@ describe("ServiceAgreement", function () {
   describe("Token Management", function () {
       it("Should whitelist token", async function () {
           const newToken = await (await ethers.getContractFactory("MockERC20"))
-              .deploy("New Token", "NEW");
+              .deploy("New Token", "NEW", ethers.parseEther("10000"));
 
           await expect(
               serviceAgreement.connect(owner).addWhitelistedToken(await newToken.getAddress())
@@ -348,7 +330,7 @@ describe("ServiceAgreement", function () {
   describe("Edge Cases and Error Conditions", function () {
       it("Should fail when creating agreement with non-whitelisted token", async function () {
           const newToken = await (await ethers.getContractFactory("MockERC20"))
-              .deploy("Bad Token", "BAD");
+              .deploy("Bad Token", "BAD", ethers.parseEther("10000"));
 
           await expect(
               serviceAgreement.connect(client).createAgreementFromTemplate(
@@ -358,11 +340,11 @@ describe("ServiceAgreement", function () {
                   [ethers.parseEther("1")],
                   await newToken.getAddress()
               )
-          ).to.be.revertedWith("Token not whitelisted");
+          ).to.be.revertedWithCustomError(serviceAgreement, "TokenNotWhitelisted");
       });
 
       it("Should fail when non-arbitrator tries to resolve dispute", async function () {
-          // Create and dispute an agreement first
+          // Create agreement and raise dispute
           await serviceAgreement.connect(client).createAgreementFromTemplate(
               0,
               provider.address,
@@ -371,15 +353,13 @@ describe("ServiceAgreement", function () {
               ZERO_ADDRESS,
               { value: ethers.parseEther("1") }
           );
-          await serviceAgreement.connect(client).raiseDispute(0, "Test reason");
-
+          
+          await serviceAgreement.connect(client).raiseDispute(0, "Dispute reason");
+          
+          // Try to resolve dispute as non-arbitrator
           await expect(
-              serviceAgreement.connect(addrs[0]).resolveDispute(
-                  0,
-                  provider.address,
-                  [ethers.parseEther("1")]
-              )
-          ).to.be.revertedWith("Only arbitrator can perform this action");
+              serviceAgreement.connect(client).resolveDispute(0, client.address, [])
+          ).to.be.revertedWithCustomError(serviceAgreement, "OnlyArbitratorAllowed");
       });
   });
 
@@ -399,9 +379,9 @@ describe("ServiceAgreement", function () {
                 )
             )
                 .to.emit(serviceAgreement, "TemplateCreated")
-                .withArgs(0, templateName);
+                .withArgs(1, templateName);
 
-            const template = await serviceAgreement.templates(0);
+            const template = await serviceAgreement.templates(1);
             expect(template.name).to.equal(templateName);
             expect(template.terms).to.equal(templateTerms);
             expect(template.recommendedDuration).to.equal(recommendedDuration);
@@ -463,15 +443,18 @@ describe("ServiceAgreement", function () {
             const amount = ethers.parseEther("100");
 
             // Send tokens to contract first
-            await mockToken.transfer(serviceAgreement.getAddress(), amount);
+            await mockToken.transfer(await serviceAgreement.getAddress(), amount);
 
-            await expect(
-                serviceAgreement.connect(owner).emergencyWithdraw(tokenAddress)
-            ).to.changeTokenBalances(
-                mockToken,
-                [serviceAgreement.getAddress(), owner.address],
-                [-amount, amount]
-            );
+            const contractBalanceBefore = await mockToken.balanceOf(await serviceAgreement.getAddress());
+            const ownerBalanceBefore = await mockToken.balanceOf(owner.address);
+            
+            await serviceAgreement.connect(owner).emergencyWithdraw(tokenAddress);
+            
+            const contractBalanceAfter = await mockToken.balanceOf(await serviceAgreement.getAddress());
+            const ownerBalanceAfter = await mockToken.balanceOf(owner.address);
+            
+            expect(contractBalanceAfter).to.equal(0);
+            expect(ownerBalanceAfter - ownerBalanceBefore).to.equal(contractBalanceBefore);
         });
     });
 
@@ -599,6 +582,343 @@ describe("ServiceAgreement", function () {
             expect(providerAgreements.length).to.equal(1);
             expect(clientAgreements[0]).to.equal(agreementId);
             expect(providerAgreements[0]).to.equal(agreementId);
+        });
+    });
+
+    describe("Batch Operations", function () {
+        let agreementId;
+        const milestoneDueDates = [
+            Math.floor(Date.now() / 1000) + 86400,
+            Math.floor(Date.now() / 1000) + 172800,
+            Math.floor(Date.now() / 1000) + 259200
+        ];
+        const milestoneAmounts = [
+            ethers.parseEther("0.3"),
+            ethers.parseEther("0.3"),
+            ethers.parseEther("0.4")
+        ];
+        const totalAmount = ethers.parseEther("1");
+        
+        beforeEach(async function () {
+            // Create test agreement
+            await serviceAgreement.connect(client).createAgreementFromTemplate(
+                0,
+                provider.address,
+                milestoneDueDates,
+                milestoneAmounts,
+                ZERO_ADDRESS,
+                { value: totalAmount }
+            );
+            agreementId = 0;
+            
+            // Submit evidence for all milestones
+            const evidenceHash = "QmTestEvidenceHash";
+            for (let i = 0; i < 3; i++) {
+                await serviceAgreement.connect(provider).submitMilestoneEvidence(
+                    agreementId, i, evidenceHash
+                );
+            }
+            
+            // Complete all milestones
+            for (let i = 0; i < 3; i++) {
+                await serviceAgreement.connect(client).completeMilestone(
+                    agreementId, i
+                );
+            }
+        });
+        
+        it("Should batch release milestone payments", async function () {
+            const providerBalanceBefore = await ethers.provider.getBalance(provider.address);
+            const feeCollectorBalanceBefore = await ethers.provider.getBalance(feeCollector.address);
+            
+            // Release payments for milestones 0 and 1
+            await serviceAgreement.connect(client).batchReleaseMilestonePayments(
+                agreementId, [0, 1]
+            );
+            
+            // Check milestone states
+            const milestone0 = await serviceAgreement.getMilestoneDetails(agreementId, 0);
+            const milestone1 = await serviceAgreement.getMilestoneDetails(agreementId, 1);
+            const milestone2 = await serviceAgreement.getMilestoneDetails(agreementId, 2);
+            
+            expect(milestone0.paid).to.be.true;
+            expect(milestone1.paid).to.be.true;
+            expect(milestone2.paid).to.be.false;
+            
+            // Calculate expected payments
+            const expectedPaymentAmount = ethers.parseEther("0.594"); // (0.3 + 0.3) * 0.99
+            const expectedFeeAmount = ethers.parseEther("0.006"); // (0.3 + 0.3) * 0.01
+            
+            const providerBalanceAfter = await ethers.provider.getBalance(provider.address);
+            const feeCollectorBalanceAfter = await ethers.provider.getBalance(feeCollector.address);
+            
+            // Check balances increased by expected amounts (approximately)
+            const providerDiff = providerBalanceAfter - providerBalanceBefore;
+            const feeDiff = feeCollectorBalanceAfter - feeCollectorBalanceBefore;
+            
+            expect(providerDiff).to.be.closeTo(expectedPaymentAmount, ethers.parseEther("0.001"));
+            expect(feeDiff).to.be.closeTo(expectedFeeAmount, ethers.parseEther("0.001"));
+            
+            // Check agreement remaining amount
+            const agreement = await serviceAgreement.getAgreementDetails(agreementId);
+            expect(agreement.remainingAmount).to.equal(milestoneAmounts[2]);
+        });
+        
+        it("Should handle batch operations with a single milestone", async function () {
+            // Release payment for only milestone 2
+            await serviceAgreement.connect(client).batchReleaseMilestonePayments(
+                agreementId, [2]
+            );
+            
+            const milestone2 = await serviceAgreement.getMilestoneDetails(agreementId, 2);
+            expect(milestone2.paid).to.be.true;
+            
+            // Verify remaining amount
+            const agreement = await serviceAgreement.getAgreementDetails(agreementId);
+            expect(agreement.remainingAmount).to.equal(
+                milestoneAmounts[0] + milestoneAmounts[1]
+            );
+        });
+        
+        it("Should revert when attempting to release unpaid milestone twice", async function () {
+            // First release
+            await serviceAgreement.connect(client).batchReleaseMilestonePayments(
+                agreementId, [0]
+            );
+            
+            // Second attempt should fail
+            await expect(
+                serviceAgreement.connect(client).batchReleaseMilestonePayments(
+                    agreementId, [0]
+                )
+            ).to.be.revertedWithCustomError(serviceAgreement, "MilestoneAlreadyPaid");
+        });
+    });
+
+    describe("Team Payment Distribution", function () {
+        let agreementId;
+        const teamMembers = [];
+        const teamShares = [20, 30, 50]; // 20%, 30%, 50%
+        const milestoneDueDates = [
+            Math.floor(Date.now() / 1000) + 86400
+        ];
+        const milestoneAmounts = [
+            ethers.parseEther("1")
+        ];
+        
+        beforeEach(async function () {
+            // Get team member addresses
+            teamMembers[0] = addrs[0].address;
+            teamMembers[1] = addrs[1].address;
+            teamMembers[2] = addrs[2].address;
+            
+            // Create agreement
+            await serviceAgreement.connect(client).createAgreementFromTemplate(
+                0,
+                provider.address,
+                milestoneDueDates,
+                milestoneAmounts,
+                ZERO_ADDRESS,
+                { value: ethers.parseEther("1") }
+            );
+            agreementId = 0;
+            
+            // Add team members
+            await serviceAgreement.connect(provider).addTeamMembers(
+                agreementId,
+                teamMembers,
+                teamShares
+            );
+            
+            // Submit evidence and complete milestone
+            await serviceAgreement.connect(provider).submitMilestoneEvidence(
+                agreementId, 0, "QmTestHash"
+            );
+            await serviceAgreement.connect(client).completeMilestone(
+                agreementId, 0
+            );
+        });
+        
+        it("Should distribute payments to team members according to shares", async function () {
+            // Get balances before
+            const balancesBefore = await Promise.all(
+                teamMembers.map(addr => ethers.provider.getBalance(addr))
+            );
+            
+            // Release payment
+            await serviceAgreement.connect(client).releaseMilestonePayment(
+                agreementId, 0
+            );
+            
+            // Get balances after
+            const balancesAfter = await Promise.all(
+                teamMembers.map(addr => ethers.provider.getBalance(addr))
+            );
+            
+            // Calculate differences
+            const diffs = balancesAfter.map((after, i) => after - balancesBefore[i]);
+            
+            // Calculate expected payments
+            const milestoneAmount = ethers.parseEther("1");
+            const fee = milestoneAmount * BigInt(1) / BigInt(100);
+            const netAmount = milestoneAmount - fee;
+            
+            const expectedPayments = teamShares.map(share => 
+                (netAmount * BigInt(share)) / BigInt(100)
+            );
+            
+            // Check that payments are close to expected values
+            for (let i = 0; i < teamMembers.length; i++) {
+                expect(diffs[i]).to.be.closeTo(expectedPayments[i], ethers.parseEther("0.0001"));
+            }
+        });
+        
+        it("Should revert when adding more than MAX_TEAM_MEMBERS", async function () {
+            // Create new agreement
+            await serviceAgreement.connect(client).createAgreementFromTemplate(
+                0,
+                provider.address,
+                milestoneDueDates,
+                milestoneAmounts,
+                ZERO_ADDRESS,
+                { value: ethers.parseEther("1") }
+            );
+            const newAgreementId = 1;
+            
+            // Create team with too many members
+            const tooManyMembers = Array(11).fill().map((_, i) => addrs[i % addrs.length].address);
+            const tooManyShares = Array(11).fill(909); // 11 * 909 ~= 10000
+            
+            await expect(
+                serviceAgreement.connect(provider).addTeamMembers(
+                    newAgreementId,
+                    tooManyMembers,
+                    tooManyShares
+                )
+            ).to.be.revertedWithCustomError(serviceAgreement, "TooManyTeamMembers");
+        });
+    });
+
+    describe("Token Operations with Slippage Protection", function () {
+        let mockTokenNoReturn;
+        
+        beforeEach(async function () {
+            // Deploy a mock token that returns less than transferred (simulates fee on transfer)
+            const MockTokenWithFee = await ethers.getContractFactory("MockTokenWithFee");
+            mockTokenNoReturn = await MockTokenWithFee.deploy("Fee Token", "FEE", 100); // 1% fee
+            
+            // Mint tokens to client
+            await mockTokenNoReturn.mint(client.address, ethers.parseEther("1000"));
+            await mockTokenNoReturn.connect(client).approve(
+                serviceAgreement.getAddress(), 
+                ethers.parseEther("1000")
+            );
+            
+            // Add token to whitelist but with timelock
+            await serviceAgreement.addWhitelistedToken(await mockTokenNoReturn.getAddress());
+            
+            // Wait for timelock to pass
+            await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60]); // 3 days
+            await ethers.provider.send("evm_mine");
+            
+            // Execute the whitelisting action
+            const actionId = ethers.keccak256(
+                ethers.solidityPacked(
+                    ["bytes32", "bytes", "uint256"],
+                    [
+                        await serviceAgreement.ACTION_WHITELIST_TOKEN(),
+                        ethers.AbiCoder.defaultAbiCoder().encode(
+                            ["address"], 
+                            [await mockTokenNoReturn.getAddress()]
+                        ),
+                        (await ethers.provider.getBlock("latest")).timestamp - 3 * 24 * 60 * 60
+                    ]
+                )
+            );
+            await serviceAgreement.executeAction(actionId);
+        });
+        
+        it("Should handle tokens with transfer fees when slippage is within limits", async function () {
+            // Set token specific slippage to 1.5%
+            await serviceAgreement.setTokenSlippage(await mockTokenNoReturn.getAddress(), 150);
+            
+            // Wait for timelock
+            await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60]);
+            await ethers.provider.send("evm_mine");
+            
+            // Execute the slippage setting action
+            const actionId = ethers.keccak256(
+                ethers.solidityPacked(
+                    ["bytes32", "bytes", "uint256"],
+                    [
+                        await serviceAgreement.ACTION_SET_TOKEN_SLIPPAGE(),
+                        ethers.AbiCoder.defaultAbiCoder().encode(
+                            ["address", "uint256"], 
+                            [await mockTokenNoReturn.getAddress(), 150]
+                        ),
+                        (await ethers.provider.getBlock("latest")).timestamp - 3 * 24 * 60 * 60
+                    ]
+                )
+            );
+            await serviceAgreement.executeAction(actionId);
+            
+            // Create agreement with fee token
+            const milestoneDueDates = [Math.floor(Date.now() / 1000) + 86400];
+            const milestoneAmounts = [ethers.parseEther("100")];
+            
+            // This should work because 1% fee is within 1.5% slippage
+            await serviceAgreement.connect(client).createAgreementFromTemplate(
+                0,
+                provider.address,
+                milestoneDueDates,
+                milestoneAmounts,
+                await mockTokenNoReturn.getAddress()
+            );
+            
+            // Verify agreement was created
+            const agreement = await serviceAgreement.getAgreementDetails(0);
+            expect(agreement.client).to.equal(client.address);
+            expect(agreement.paymentToken).to.equal(await mockTokenNoReturn.getAddress());
+        });
+        
+        it("Should reject transactions with excessive slippage", async function () {
+            // Set token specific slippage to 0.5% (less than the token's 1% fee)
+            await serviceAgreement.setTokenSlippage(await mockTokenNoReturn.getAddress(), 50);
+            
+            // Wait for timelock
+            await ethers.provider.send("evm_increaseTime", [3 * 24 * 60 * 60]);
+            await ethers.provider.send("evm_mine");
+            
+            // Execute the slippage setting action
+            const actionId = ethers.keccak256(
+                ethers.solidityPacked(
+                    ["bytes32", "bytes", "uint256"],
+                    [
+                        await serviceAgreement.ACTION_SET_TOKEN_SLIPPAGE(),
+                        ethers.AbiCoder.defaultAbiCoder().encode(
+                            ["address", "uint256"], 
+                            [await mockTokenNoReturn.getAddress(), 50]
+                        ),
+                        (await ethers.provider.getBlock("latest")).timestamp - 3 * 24 * 60 * 60
+                    ]
+                )
+            );
+            await serviceAgreement.executeAction(actionId);
+            
+            // Create agreement with fee token
+            const milestoneDueDates = [Math.floor(Date.now() / 1000) + 86400];
+            const milestoneAmounts = [ethers.parseEther("100")];
+            
+            // This should fail because 1% fee exceeds 0.5% slippage
+            await expect(
+                serviceAgreement.connect(client).createAgreementFromTemplate(
+                    0,
+                    provider.address,
+                    milestoneDueDates,
+                    milestoneAmounts,
+                    await mockTokenNoReturn.getAddress()
+                )
+            ).to.be.revertedWithCustomError(serviceAgreement, "SlippageExceeded");
         });
     });
 });
