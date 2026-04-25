@@ -49,9 +49,13 @@ client funds agreement ─> provider.submitMilestoneEvidence ─> client.approve
 
 ## Documentation
 
-- **[docs/scenarios.md](./docs/scenarios.md)** — end-to-end walkthroughs for common flows (freelance, audit engagement, team split, disputes, cancellations, operator rotations, upgrades).
+A browsable docs site is published from `docs/` to GitHub Pages. The same content lives in the repo:
+
+- **[docs/index.md](./docs/index.md)** — landing page and integrator orientation.
+- **[docs/scenarios.md](./docs/scenarios.md)** — end-to-end walkthroughs (freelance, audit engagement, team split, disputes, cancellations, operator rotations, upgrades).
+- **[docs/errors.md](./docs/errors.md)** — every custom error: cause, where it's thrown, integrator handling.
 - **[docs/api/index.md](./docs/api/index.md)** — per-function API reference generated from NatSpec via `npm run docs`.
-- **[docs/README.md](./docs/README.md)** — docs landing page.
+- **[CHANGELOG.md](./CHANGELOG.md)** — version history and security status.
 
 ## Layout
 
@@ -63,9 +67,11 @@ contracts/
     MockTokenWithFee.sol      # fee-on-transfer token (used to verify rejection)
     EthRefuser.sol            # contract that refuses ETH; verifies pull-payment isolation
 docs/
-  README.md                   # docs landing
+  index.md                    # docs landing (Jekyll home)
   scenarios.md                # end-to-end walkthroughs
-  api/index.md                # generated API reference
+  errors.md                   # custom error reference
+  api/index.md                # generated API reference (do not edit)
+  _config.yml                 # Jekyll / just-the-docs config
 scripts/
   deploy.js                   # deploys proxy + schedules privileged config
   upgrade.js                  # upgrades the implementation behind the proxy

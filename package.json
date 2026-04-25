@@ -6,7 +6,7 @@
     "test": "hardhat test",
     "compile": "hardhat compile",
     "coverage": "hardhat coverage",
-    "docs": "hardhat docgen"
+    "docs": "hardhat docgen && node scripts/post-docs.js"
   },
   "keywords": [],
   "author": "",

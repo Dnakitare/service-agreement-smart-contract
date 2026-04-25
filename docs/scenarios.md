@@ -1,3 +1,8 @@
+---
+title: Scenarios
+nav_order: 2
+---
+
 # Scenarios
 
 End-to-end walkthroughs for the most common ways to use `ServiceAgreement`. Each scenario shows the actual on-chain calls in sequence — copy them as a starting point, then adapt addresses, amounts, and milestone schedules.

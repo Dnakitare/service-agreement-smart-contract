@@ -1,3 +1,9 @@
+---
+title: Home
+layout: home
+nav_order: 1
+---
+
 # ServiceAgreement docs
 
 Documentation for integrators building against the `ServiceAgreement` contract.

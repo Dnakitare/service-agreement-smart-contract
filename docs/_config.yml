@@ -1,0 +1,43 @@
+title: ServiceAgreement
+description: Milestone-based escrow contract — integrator documentation
+remote_theme: just-the-docs/just-the-docs
+
+# just-the-docs settings
+search_enabled: true
+heading_anchors: true
+color_scheme: dark
+
+aux_links:
+  Repository: https://github.com/dnakitare/service-agreement
+
+aux_links_new_tab: true
+
+# GitHub-flavored markdown
+markdown: kramdown
+kramdown:
+  syntax_highlighter: rouge
+  syntax_highlighter_opts:
+    block:
+      line_numbers: false
+
+plugins:
+  - jekyll-remote-theme
+  - jekyll-seo-tag
+
+# Don't try to render the Solidity contract or the Hardhat config
+exclude:
+  - "../contracts"
+  - "../node_modules"
+  - "../scripts"
+  - "../test"
+  - "../artifacts"
+  - "../cache"
+  - "Gemfile"
+  - "Gemfile.lock"
+
+# Make /docs/api/ render as a single page in nav
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default

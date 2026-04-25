@@ -1,3 +1,8 @@
+---
+title: API reference
+nav_order: 4
+---
+
 # Solidity API
 
 ## ServiceAgreement

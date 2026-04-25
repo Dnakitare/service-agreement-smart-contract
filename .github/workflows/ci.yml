@@ -36,7 +36,7 @@ jobs:
       - name: Verify generated docs are up to date
         run: |
           npm run docs
-          if ! git diff --exit-code -- docs/api; then
+          if ! git diff --exit-code -- docs/api/; then
             echo "::error::docs/api is out of sync with NatSpec. Run 'npm run docs' and commit the result."
             exit 1
           fi
