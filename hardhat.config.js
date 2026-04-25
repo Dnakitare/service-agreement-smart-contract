@@ -1,5 +1,6 @@
 require("@nomicfoundation/hardhat-toolbox");
 require("@openzeppelin/hardhat-upgrades");
+require("solidity-docgen");
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
@@ -10,12 +11,18 @@ module.exports = {
         enabled: true,
         runs: 200
       },
-      viaIR: true 
+      viaIR: true
     },
   },
   networks: {
     hardhat: {
       chainId: 31337
     }
+  },
+  docgen: {
+    outputDir: "docs/api",
+    pages: "single",
+    exclude: ["test"],
+    pageExtension: ".md"
   }
 };

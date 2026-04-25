@@ -5,7 +5,8 @@
   "scripts": {
     "test": "hardhat test",
     "compile": "hardhat compile",
-    "coverage": "hardhat coverage"
+    "coverage": "hardhat coverage",
+    "docs": "hardhat docgen"
   },
   "keywords": [],
   "author": "",
@@ -19,7 +20,8 @@
     "@openzeppelin/hardhat-upgrades": "^3.9.0",
     "chai": "^4.5.0",
     "ethers": "^6.13.5",
-    "hardhat": "^2.22.17"
+    "hardhat": "^2.22.17",
+    "solidity-docgen": "^0.6.0-beta.36"
   },
   "dependencies": {
     "@openzeppelin/contracts": "^5.2.0"

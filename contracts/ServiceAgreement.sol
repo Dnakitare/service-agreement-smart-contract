@@ -10,16 +10,32 @@ import "@openzeppelin/contracts-upgradeable/utils/PausableUpgradeable.sol";
 import "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 
 /// @title ServiceAgreement
-/// @notice Milestone-based escrow for service agreements between a client and provider.
-/// @dev Key design properties:
-///      - Pull payments: recipients call withdraw() instead of receiving pushed transfers.
-///        This prevents a single bad team member from blocking everyone else.
-///      - Real timelock: every privileged config change schedules an action that can only
-///        be executed after TIMELOCK_DELAY. There is no immediate-execute bypass.
-///      - Solvency invariant: for every accepted token, the contract balance is always
-///        >= totalObligations[token]. emergencyWithdraw can only take the surplus.
-///      - Fee-on-transfer / rebasing tokens are rejected at deposit time to keep the
-///        invariant exact. Whitelisted tokens are expected to be standard ERC20s.
+/// @notice Milestone-based escrow for service agreements between a client and a provider.
+/// The client funds an agreement up front; the provider submits evidence per milestone;
+/// the client approves to release payment. A platform fee (default 1%) is taken at
+/// release. Disputes are resolved by an arbitrator from a configured pool.
+/// @dev Six enforced design properties:
+///
+/// 1. **Pull payments.** All payouts credit `pendingWithdrawals[token][recipient]`.
+///    Recipients claim with `withdraw(token)`. A refusing receiver only affects itself.
+///
+/// 2. **Real timelock on config + upgrades.** Every privileged config change and every
+///    implementation upgrade goes through `scheduleAction → executeAction` (or
+///    `requestUpgrade → upgradeToAndCall`) with a 2-day delay. No immediate bypass.
+///
+/// 3. **Solvency.** For every token, `balance(token) >= totalObligations[token]` at
+///    all times. `withdrawSurplus` can only ever take the strict surplus.
+///
+/// 4. **Standard ERC20 only.** `_pullToken` reverts if `received != amount`,
+///    rejecting fee-on-transfer and rebasing tokens.
+///
+/// 5. **Atomic milestone approve + pay.** `approveMilestone` marks the milestone
+///    complete, decrements escrow, and credits the recipients in one transaction.
+///    There is no separate "complete" step — eliminating the front-run window where
+///    a malicious provider could `raiseDispute` between completion and payment.
+///
+/// 6. **Two-sided team payment authorization.** `proposeTeam` (provider) +
+///    `approveTeam` (client). Until the client approves, payouts go to the provider.
 contract ServiceAgreement is
     Initializable,
     ReentrancyGuardUpgradeable,
@@ -276,6 +292,11 @@ contract ServiceAgreement is
         _disableInitializers();
     }
 
+    /// @notice Initializes the proxy. Called once at deployment via the UUPS proxy.
+    /// The caller becomes `owner`. Seeds the arbitrator pool with a single arbitrator;
+    /// rotate later via the timelocked `scheduleAction(ACTION_SET_ARBITRATOR_POOL)`.
+    /// @param arbitrator_ Initial arbitrator. Must be non-zero.
+    /// @param feeCollector_ Address that receives the platform fee on each payout. Must be non-zero.
     function initialize(address arbitrator_, address feeCollector_) external initializer {
         if (arbitrator_ == address(0) || feeCollector_ == address(0)) revert ZeroAddress();
 
@@ -292,9 +313,12 @@ contract ServiceAgreement is
         emit FeeCollectorUpdated(address(0), feeCollector_);
     }
 
-    /// @notice Schedule an upgrade to a specific implementation. The upgrade itself
-    /// (via UUPSUpgradeable.upgradeToAndCall) becomes executable after TIMELOCK_DELAY.
-    /// Re-requesting for the same implementation overwrites the schedule.
+    /// @notice Schedules an upgrade to `newImplementation`. The upgrade itself (via
+    /// `upgradeToAndCall`) only succeeds after `TIMELOCK_DELAY` has elapsed. Calling
+    /// again for the same implementation overwrites the executable time, effectively
+    /// resetting (or extending) the timelock for that target.
+    /// @dev `_authorizeUpgrade` consumes the request on success.
+    /// @param newImplementation Address of the new implementation contract. Must be non-zero.
     function requestUpgrade(address newImplementation) external onlyOwner {
         if (newImplementation == address(0)) revert ZeroAddress();
         uint256 executableAt = block.timestamp + TIMELOCK_DELAY;
@@ -302,6 +326,8 @@ contract ServiceAgreement is
         emit UpgradeRequested(newImplementation, executableAt);
     }
 
+    /// @notice Cancels a previously-scheduled upgrade request.
+    /// @param newImplementation Implementation address whose request should be cancelled.
     function cancelUpgradeRequest(address newImplementation) external onlyOwner {
         if (upgradeRequestedAt[newImplementation] == 0) revert ActionNotFound();
         delete upgradeRequestedAt[newImplementation];
@@ -318,19 +344,27 @@ contract ServiceAgreement is
 
     // ============ Pause ============
 
+    /// @notice Pauses cooperative state changes. Pull-payment withdrawals remain
+    /// callable so users can always claim funds they are already owed.
     function pause() external onlyOwner {
         _pause();
     }
 
+    /// @notice Lifts a pause set by `pause()`.
     function unpause() external onlyOwner {
         _unpause();
     }
 
     // ============ Timelock: schedule / execute / cancel ============
 
-    /// @notice Schedule a privileged config change. Owner-only. Becomes executable
-    /// after TIMELOCK_DELAY. Reverts if an identical action with the same nonce is
-    /// already pending.
+    /// @notice Schedules a privileged config change for execution after `TIMELOCK_DELAY`.
+    /// @dev Valid `actionType` values: `ACTION_SET_ARBITRATOR_POOL`,
+    /// `ACTION_SET_FEE_COLLECTOR`, `ACTION_WHITELIST_TOKEN`, `ACTION_REMOVE_TOKEN`.
+    /// Reverts if a tx with the same `(actionType, data, block.timestamp, block.number)`
+    /// has already been scheduled (collision case for same-block multi-call).
+    /// @param actionType One of the four `ACTION_*` constants.
+    /// @param data ABI-encoded arguments for the action (see action constants for shape).
+    /// @return actionId Identifier to pass to `executeAction` or `cancelScheduledAction`.
     function scheduleAction(bytes32 actionType, bytes calldata data) external onlyOwner returns (bytes32 actionId) {
         if (
             actionType != ACTION_SET_ARBITRATOR_POOL &&
@@ -356,6 +390,8 @@ contract ServiceAgreement is
         emit ActionScheduled(actionId, actionType, data, executableAt);
     }
 
+    /// @notice Executes a previously-scheduled action whose timelock has elapsed.
+    /// @param actionId The ID returned by `scheduleAction`.
     function executeAction(bytes32 actionId) external onlyOwner {
         PendingAction storage action = pendingActions[actionId];
         if (action.executableAt == 0) revert ActionNotFound();
@@ -384,6 +420,8 @@ contract ServiceAgreement is
         emit ActionExecuted(actionId);
     }
 
+    /// @notice Cancels a pending (not-yet-executed) scheduled action.
+    /// @param actionId The ID returned by `scheduleAction`.
     function cancelScheduledAction(bytes32 actionId) external onlyOwner {
         PendingAction storage action = pendingActions[actionId];
         if (action.executableAt == 0) revert ActionNotFound();
@@ -433,6 +471,14 @@ contract ServiceAgreement is
 
     // ============ Templates ============
 
+    /// @notice Creates a new agreement template. Templates carry default terms,
+    /// a recommended duration, and a recommended milestone count that integrators
+    /// can use to seed the create-agreement form. Templates are owner-managed.
+    /// @param name Human-readable template name.
+    /// @param terms Default terms text used by `createAgreementFromTemplate`.
+    /// @param recommendedDuration Recommended agreement length in seconds. Must be ≤ MAX_DEADLINE.
+    /// @param recommendedMilestones Recommended number of milestones. Must be ≤ MAX_MILESTONES.
+    /// @return templateId Identifier for the new template.
     function createTemplate(
         string calldata name,
         string calldata terms,
@@ -453,6 +499,14 @@ contract ServiceAgreement is
         emit TemplateCreated(templateId, name);
     }
 
+    /// @notice Updates an existing template in place. Existing agreements are
+    /// unaffected because they snapshot the terms text at creation.
+    /// @param templateId Existing template ID.
+    /// @param name New name.
+    /// @param terms New terms text.
+    /// @param recommendedDuration New recommended duration in seconds.
+    /// @param recommendedMilestones New recommended milestone count.
+    /// @param isActive Whether the template can seed new agreements.
     function updateTemplate(
         uint256 templateId,
         string calldata name,
@@ -477,8 +531,19 @@ contract ServiceAgreement is
 
     // ============ Agreement creation ============
 
-    /// @notice Create an agreement seeded from a template. Funds are escrowed up front.
-    /// For ETH: send msg.value == sum(milestoneAmounts). For ERC20: approve first.
+    /// @notice Creates an agreement using the terms text from an existing template.
+    /// Funds are escrowed up front: for ETH send `msg.value == sum(milestoneAmounts)`;
+    /// for an ERC20, approve the contract for the same total before calling.
+    /// @dev `msg.sender` becomes the client. `provider` must differ from `msg.sender`.
+    /// Milestone deadlines must be strictly chronological and the last must not exceed
+    /// `block.timestamp + MAX_DEADLINE`. Each milestone amount must be non-zero. The
+    /// total amount must fit in `uint128`.
+    /// @param templateId Active template providing the terms text.
+    /// @param provider Service provider address. Cannot equal `msg.sender` or be zero.
+    /// @param milestoneDueDates Per-milestone deadline timestamps; strictly increasing.
+    /// @param milestoneAmounts Per-milestone payment amounts; non-zero. Sum equals total.
+    /// @param paymentToken `address(0)` for ETH, otherwise a whitelisted ERC20.
+    /// @return agreementId Identifier for the new agreement (also `agreementCount - 1`).
     function createAgreementFromTemplate(
         uint256 templateId,
         address provider,
@@ -493,7 +558,14 @@ contract ServiceAgreement is
         return _createAgreement(provider, tpl.terms, milestoneDueDates, milestoneAmounts, paymentToken);
     }
 
-    /// @notice Create an agreement with custom terms (no template).
+    /// @notice Creates an agreement with custom terms text (no template required).
+    /// All other validation is identical to `createAgreementFromTemplate`.
+    /// @param provider Service provider address.
+    /// @param terms Free-form terms text recorded immutably on the agreement.
+    /// @param milestoneDueDates Per-milestone deadline timestamps; strictly increasing.
+    /// @param milestoneAmounts Per-milestone payment amounts.
+    /// @param paymentToken `address(0)` for ETH, otherwise a whitelisted ERC20.
+    /// @return agreementId Identifier for the new agreement.
     function createAgreement(
         address provider,
         string calldata terms,
@@ -573,10 +645,21 @@ contract ServiceAgreement is
 
     // ============ Team payments ============
 
-    /// @notice Provider proposes a team payment split. Provider may re-propose
-    /// (overwriting the previous proposal) until the client approves it. Once
-    /// approved by `approveTeam`, the split is locked.
-    /// @dev Shares are basis points and must sum to BASIS_POINTS.
+    /// @notice Provider proposes a team payment split. The proposal does not take
+    /// effect until the client calls `approveTeam`. Until then, milestone payouts
+    /// are credited to `provider` directly. The provider may re-propose (overwriting
+    /// the previous proposal) at any time before approval.
+    /// @dev Shares are basis points (1 = 0.01%) and must sum exactly to `BASIS_POINTS`
+    /// (10,000). At most `MAX_TEAM_MEMBERS` (10). Each share must be non-zero. The
+    /// last team member absorbs rounding dust on each distribution.
+    /// Reverts:
+    ///   - `Unauthorized` if caller is not the provider.
+    ///   - `AgreementClosed` if cancelled / completed / disputed.
+    ///   - `TeamAlreadySet` if the team has already been approved.
+    ///   - `NoTeamMembers`, `TooManyTeamMembers`, `ArrayLengthMismatch`, `InvalidShares`, `ZeroAddress`.
+    /// @param agreementId Agreement identifier.
+    /// @param members Recipient addresses for the split (length 1..MAX_TEAM_MEMBERS).
+    /// @param shares Basis-point shares aligned to `members`; sum to `BASIS_POINTS`.
     function proposeTeam(
         uint256 agreementId,
         address[] calldata members,
@@ -609,9 +692,13 @@ contract ServiceAgreement is
         emit TeamProposed(agreementId, members, shares);
     }
 
-    /// @notice Client approves the provider's most recent team proposal. After
-    /// approval, future milestone payouts are split among the proposed members.
-    /// Approval is final; provider cannot re-propose afterward.
+    /// @notice Client approves the provider's most recent team proposal. After this
+    /// call, all subsequent milestone payouts are split per the proposed shares
+    /// (instead of being credited to the provider). Approval is final — neither
+    /// `proposeTeam` nor a second `approveTeam` will succeed afterward.
+    /// @dev Reverts: `Unauthorized` (not client), `AgreementClosed` (cancelled /
+    /// completed / disputed), `TeamAlreadySet`, `NoTeamProposed`.
+    /// @param agreementId Agreement identifier.
     function approveTeam(uint256 agreementId)
         external
         validAgreement(agreementId)
@@ -630,6 +717,16 @@ contract ServiceAgreement is
 
     // ============ Milestone lifecycle ============
 
+    /// @notice Provider records evidence that a milestone is complete. Typically the
+    /// evidence is an IPFS / Arweave / Sia content hash — the contract treats it as
+    /// opaque bytes. Re-submitting overwrites the previous evidence (provider may
+    /// fix a bad hash). Once `approveMilestone` is called the milestone is paid and
+    /// further evidence updates are blocked.
+    /// @dev Blocked once the agreement is disputed; the existing evidence is what
+    /// the arbitrator will resolve against.
+    /// @param agreementId Agreement identifier.
+    /// @param milestoneIndex Zero-based milestone index.
+    /// @param evidenceHash Non-empty content identifier (e.g., IPFS CID).
     function submitMilestoneEvidence(
         uint256 agreementId,
         uint256 milestoneIndex,
@@ -647,6 +744,13 @@ contract ServiceAgreement is
         emit MilestoneEvidenceSubmitted(agreementId, milestoneIndex, evidenceHash);
     }
 
+    /// @notice Client extends the deadline of an unpaid milestone. The new deadline
+    /// must be later than the current one and within `MAX_DEADLINE` of `block.timestamp`.
+    /// If the new deadline exceeds `agreement.deadline`, the agreement deadline is
+    /// lifted to match (so the provider's dispute window cannot open prematurely).
+    /// @param agreementId Agreement identifier.
+    /// @param milestoneIndex Zero-based milestone index. Must not be paid.
+    /// @param newDeadline New milestone deadline timestamp.
     function extendMilestoneDeadline(uint256 agreementId, uint256 milestoneIndex, uint256 newDeadline)
         external
         validAgreement(agreementId)
@@ -672,10 +776,14 @@ contract ServiceAgreement is
         emit MilestoneDeadlineExtended(agreementId, milestoneIndex, newDeadline);
     }
 
-    /// @notice Client approves a milestone and atomically releases its payment.
-    /// Marking a milestone complete and paying are a single tx so a malicious
-    /// provider cannot front-run the client's release with a `raiseDispute` to
-    /// force arbitration.
+    /// @notice Client approves a milestone, atomically marking it complete and
+    /// crediting the payment. The platform fee is deducted and credited to the fee
+    /// collector; the remainder goes to the provider — or, if `teamApproved`, to the
+    /// proposed team per their basis-point shares. Recipients claim with `withdraw`.
+    /// @dev Approve and pay are merged into a single call so a malicious provider
+    /// cannot front-run the client by inserting `raiseDispute` between the two.
+    /// @param agreementId Agreement identifier.
+    /// @param milestoneIndex Zero-based milestone index; must have evidence and be unpaid.
     function approveMilestone(uint256 agreementId, uint256 milestoneIndex)
         external
         validAgreement(agreementId)
@@ -709,6 +817,11 @@ contract ServiceAgreement is
         emit MilestoneApproved(agreementId, milestoneIndex, amount, fee);
     }
 
+    /// @notice Approves and pays multiple milestones in one call. Same semantics as
+    /// `approveMilestone`, applied to each index. Reverts and rolls back if any
+    /// listed milestone is paid, missing evidence, or out of bounds.
+    /// @param agreementId Agreement identifier.
+    /// @param milestoneIndices Zero-based milestone indices to approve.
     function batchApproveMilestones(uint256 agreementId, uint256[] calldata milestoneIndices)
         external
         validAgreement(agreementId)
@@ -766,9 +879,11 @@ contract ServiceAgreement is
 
     // ============ Cancellation ============
 
-    /// @notice Client may cancel within CANCELLATION_WINDOW of creation, only if no
-    /// milestone has been paid and no dispute is active. The full remaining balance
-    /// is credited back to the client (claim via withdraw()).
+    /// @notice Client cancels an agreement and gets their full remaining balance
+    /// credited back. Only valid within `CANCELLATION_WINDOW` (24h) of creation,
+    /// before any milestone is paid, and outside an active dispute.
+    /// @param agreementId Agreement identifier.
+    /// @param reason Free-form reason recorded in the event.
     function cancelAgreement(uint256 agreementId, string calldata reason)
         external
         validAgreement(agreementId)
@@ -798,11 +913,17 @@ contract ServiceAgreement is
 
     // ============ Dispute ============
 
-    /// @notice Raise a dispute. Either party may dispute, but with asymmetric rules:
-    ///   - The client may dispute at any time (their funds are at risk).
-    ///   - The provider may only dispute after the agreement deadline has elapsed,
-    ///     which prevents them from front-running the client's `approveMilestone`
-    ///     to force arbitration on work the client was about to pay for.
+    /// @notice Raises a dispute that freezes the agreement until an arbitrator
+    /// resolves it via `resolveDispute`.
+    /// @dev Asymmetric rules:
+    ///   - The client may raise at any time (their funds are at risk).
+    ///   - The provider may only raise after `agreement.deadline` has elapsed
+    ///     (prevents front-running a client's `approveMilestone` to force arbitration).
+    /// Once disputed, all cooperative state changes (`approveMilestone`, evidence,
+    /// extensions, team proposals/approvals, cancellation) are blocked until
+    /// `resolveDispute`.
+    /// @param agreementId Agreement identifier.
+    /// @param reason Free-form reason recorded in the event.
     function raiseDispute(uint256 agreementId, string calldata reason)
         external
         validAgreement(agreementId)
@@ -819,9 +940,14 @@ contract ServiceAgreement is
         emit DisputeRaised(agreementId, msg.sender, reason);
     }
 
-    /// @notice Resolve a dispute by splitting the remaining escrowed funds.
-    /// `amountToProvider` of the remaining balance goes to the provider (minus
-    /// platform fee), the rest is refunded to the client. Either may be zero.
+    /// @notice Arbitrator resolves a dispute by splitting the remaining escrowed
+    /// balance. `amountToProvider` (post platform fee) is credited to the provider
+    /// or team; the rest is refunded to the client. Either side of the split may
+    /// be zero. Resolution closes the agreement (`completed = true`).
+    /// @dev Only an address in the arbitrator pool may call.
+    /// @param agreementId Agreement identifier.
+    /// @param amountToProvider Portion of `remainingAmount` awarded to the provider
+    ///                         side. Must be ≤ `remainingAmount`.
     function resolveDispute(uint256 agreementId, uint256 amountToProvider)
         external
         validAgreement(agreementId)
@@ -860,9 +986,14 @@ contract ServiceAgreement is
 
     // ============ Ratings ============
 
-    /// @notice Submit a rating for the counterparty. Only valid after the agreement
-    /// is fully completed (all milestones paid or dispute resolved). Each address may
-    /// rate once per agreement.
+    /// @notice Submits a 1–5 rating for the counterparty. Only valid after the
+    /// agreement is `completed` (final milestone approved or dispute resolved).
+    /// Each participant may rate exactly once per agreement; ratings are recorded
+    /// in `ratings[ratedAddress]` along with a transaction-value-weighted score
+    /// retrievable via `getUserRating`.
+    /// @param agreementId Agreement identifier.
+    /// @param ratedAddress The counterparty being rated; must be the other party.
+    /// @param score Rating score in `[MIN_RATING, MAX_RATING]` (1..5 inclusive).
     function submitRating(uint256 agreementId, address ratedAddress, uint256 score)
         external
         validAgreement(agreementId)
@@ -892,7 +1023,11 @@ contract ServiceAgreement is
 
     // ============ Pull payments ============
 
-    /// @notice Claim any pending balance owed to the caller in the given token.
+    /// @notice Claims any pending balance owed to `msg.sender` in `token`. ETH or
+    /// any ERC20 (using `address(0)` for ETH). The balance is zeroed before transfer.
+    /// Reverts with `NothingToWithdraw` if no balance is owed.
+    /// @param token `address(0)` for ETH, otherwise the ERC20 token address.
+    /// @return amount The amount transferred.
     function withdraw(address token) external nonReentrant returns (uint256 amount) {
         amount = pendingWithdrawals[token][msg.sender];
         if (amount == 0) revert NothingToWithdraw();
@@ -910,9 +1045,12 @@ contract ServiceAgreement is
 
     // ============ Emergency / surplus withdraw ============
 
-    /// @notice Owner may withdraw only the surplus above totalObligations[token].
-    /// User-escrowed funds and credited (pending-withdrawal) balances are protected.
-    /// This is intended for accidental transfers, dust, or rebases.
+    /// @notice Owner withdraws only the surplus of `token` above
+    /// `totalObligations[token]`. Escrow and pending withdrawals are never touched.
+    /// Intended for accidental transfers, ETH sent via SELFDESTRUCT, or rebase dust.
+    /// Reverts with `NothingToWithdraw` if there is no surplus.
+    /// @param token `address(0)` for ETH, otherwise the ERC20 token address.
+    /// @param recipient Non-zero recipient of the surplus.
     function withdrawSurplus(address token, address recipient) external onlyOwner nonReentrant {
         if (recipient == address(0)) revert ZeroAddress();
         uint256 balance = token == ETH ? address(this).balance : IERC20(token).balanceOf(address(this));
@@ -971,6 +1109,19 @@ contract ServiceAgreement is
 
     // ============ Views ============
 
+    /// @notice Returns the top-level fields of an agreement.
+    /// @param agreementId Agreement identifier.
+    /// @return client The client address.
+    /// @return provider The provider address.
+    /// @return totalAmount Total escrow at creation.
+    /// @return remainingAmount Escrow not yet released or refunded.
+    /// @return deadline Last milestone deadline (kept in sync via `extendMilestoneDeadline`).
+    /// @return createdAt Creation timestamp.
+    /// @return completed True once all milestones are paid or a dispute was resolved.
+    /// @return disputed True between `raiseDispute` and `resolveDispute`.
+    /// @return cancelled True after `cancelAgreement`.
+    /// @return paymentToken `address(0)` for ETH, otherwise an ERC20.
+    /// @return terms The terms text recorded at creation.
     function getAgreementDetails(uint256 agreementId)
         external
         view
@@ -1005,10 +1156,14 @@ contract ServiceAgreement is
         );
     }
 
+    /// @notice Number of milestones on an agreement.
     function getMilestoneCount(uint256 agreementId) external view validAgreement(agreementId) returns (uint256) {
         return _agreements[agreementId].milestones.length;
     }
 
+    /// @notice Returns a single milestone's fields.
+    /// @param agreementId Agreement identifier.
+    /// @param milestoneIndex Zero-based milestone index.
     function getMilestone(uint256 agreementId, uint256 milestoneIndex)
         external
         view
@@ -1021,6 +1176,8 @@ contract ServiceAgreement is
         return (m.deadline, m.amount, m.completed, m.paid, m.evidenceHash);
     }
 
+    /// @notice Returns all milestones for an agreement as an array of structs.
+    /// @dev Capped by `MAX_MILESTONES` (20), so the size is bounded.
     function getMilestones(uint256 agreementId)
         external
         view
@@ -1030,6 +1187,11 @@ contract ServiceAgreement is
         return _agreements[agreementId].milestones;
     }
 
+    /// @notice Returns the agreement's proposed team split. Indices align between
+    /// `members` and `shares`. If empty, no team has been proposed.
+    /// @dev The split is only active for distributions if `teamApproved` is true,
+    /// which can be checked separately via `getAgreementDetails` is not — use
+    /// off-chain reads of the public getters or extend with a dedicated view.
     function getTeam(uint256 agreementId)
         external
         view
@@ -1040,10 +1202,18 @@ contract ServiceAgreement is
         return (a.teamMembers, a.teamShares);
     }
 
+    /// @notice Returns all agreement IDs in which `user` is the client or provider.
+    /// @dev The list grows unboundedly; large users should expect non-trivial gas
+    /// for this view and may prefer off-chain indexing.
     function getUserAgreements(address user) external view returns (uint256[] memory) {
         return _userAgreements[user];
     }
 
+    /// @notice Returns rating aggregates for a user.
+    /// @return total Sum of all received scores.
+    /// @return count Number of received ratings.
+    /// @return average Unweighted mean (`total / count`, or 0 if count is 0).
+    /// @return weightedAverage Mean weighted by each agreement's `totalAmount`.
     function getUserRating(address user)
         external
         view
@@ -1056,14 +1226,17 @@ contract ServiceAgreement is
         weightedAverage = r.totalTransactionValue > 0 ? r.weightedScore / r.totalTransactionValue : 0;
     }
 
+    /// @notice Returns the current arbitrator pool. `isArbitrator(addr)` gives O(1) membership.
     function arbitratorPool() external view returns (address[] memory) {
         return _arbitratorList;
     }
 
+    /// @notice Number of addresses in the current arbitrator pool.
     function arbitratorCount() external view returns (uint256) {
         return _arbitratorList.length;
     }
 
+    /// @notice Whether `user` has already submitted a rating for `agreementId`.
     function hasRated(uint256 agreementId, address user) external view validAgreement(agreementId) returns (bool) {
         return _agreements[agreementId].hasRated[user];
     }

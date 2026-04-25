@@ -47,6 +47,12 @@ client funds agreement ─> provider.submitMilestoneEvidence ─> client.approve
 
 **Upgrades.** The owner calls `requestUpgrade(newImplementation)`, waits 2 days, then calls `upgradeToAndCall`. `_authorizeUpgrade` validates that the implementation matches a request whose timelock has elapsed; otherwise it reverts. Upgrade requests can be cancelled.
 
+## Documentation
+
+- **[docs/scenarios.md](./docs/scenarios.md)** — end-to-end walkthroughs for common flows (freelance, audit engagement, team split, disputes, cancellations, operator rotations, upgrades).
+- **[docs/api/index.md](./docs/api/index.md)** — per-function API reference generated from NatSpec via `npm run docs`.
+- **[docs/README.md](./docs/README.md)** — docs landing page.
+
 ## Layout
 
 ```
@@ -56,13 +62,18 @@ contracts/
     MockERC20.sol             # standard ERC20 for tests
     MockTokenWithFee.sol      # fee-on-transfer token (used to verify rejection)
     EthRefuser.sol            # contract that refuses ETH; verifies pull-payment isolation
+docs/
+  README.md                   # docs landing
+  scenarios.md                # end-to-end walkthroughs
+  api/index.md                # generated API reference
 scripts/
   deploy.js                   # deploys proxy + schedules privileged config
   upgrade.js                  # upgrades the implementation behind the proxy
   verify.js                   # Etherscan verification helper
 test/
-  ServiceAgreement.test.js    # 61 tests: happy paths + adversarial cases
+  ServiceAgreement.test.js    # 93 tests: happy paths + adversarial cases
 hardhat.config.js
+slither.config.json
 ```
 
 ## Develop
