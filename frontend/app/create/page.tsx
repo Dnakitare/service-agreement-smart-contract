@@ -4,7 +4,7 @@ import { useState } from "react";
 import { ethers } from "ethers";
 import { useRouter } from "next/navigation";
 import WalletGate from "@/components/WalletGate";
-import { getWriteContract, ZERO } from "@/lib/contract";
+import { CONTRACT_ADDRESS, fmtEth, getWriteContract, ZERO } from "@/lib/contract";
 
 export default function CreatePage() {
   return (
@@ -61,6 +61,20 @@ function CreateForm() {
       // chronological sanity (UI side)
       for (let i = 1; i < dueDates.length; i++) {
         if (dueDates[i] <= dueDates[i - 1]) throw new Error("Milestone deadlines must be strictly increasing");
+      }
+
+      const summary =
+        `About to create + fund an agreement:\n\n` +
+        `Provider:  ${provider}\n` +
+        `Amount:    ${fmtEth(total)}\n` +
+        `Milestones: ${milestones.length}\n` +
+        milestones.map((m, i) => `  #${i}: ${m.amount} ETH due in ${m.daysFromNow}d`).join("\n") +
+        `\n\nContract:  ${CONTRACT_ADDRESS}\n\n` +
+        `This will lock the ETH in escrow until each milestone is approved or the dispute path resolves.`;
+      if (!window.confirm(summary)) {
+        setError("Cancelled");
+        setBusy(false);
+        return;
       }
 
       const c = await getWriteContract();

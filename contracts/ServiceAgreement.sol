@@ -92,6 +92,8 @@ contract ServiceAgreement is
     error UpgradeNotRequested();
     error ActionAlreadyScheduled();
     error TooManyArbitrators();
+    error EvidenceCommitmentMismatch();
+    error ArbitratorIsParticipant();
 
     // ============ Constants ============
 
@@ -125,6 +127,9 @@ contract ServiceAgreement is
         string evidenceHash;
     }
 
+    /// @dev IMPORTANT — append-only across upgrades. New fields must be added at the
+    /// end (after the `hasRated` mapping). Reordering or inserting fields will
+    /// silently misalign storage for agreements created on the previous layout.
     struct Agreement {
         address client;
         address provider;
@@ -744,10 +749,17 @@ contract ServiceAgreement is
         emit MilestoneEvidenceSubmitted(agreementId, milestoneIndex, evidenceHash);
     }
 
-    /// @notice Client extends the deadline of an unpaid milestone. The new deadline
-    /// must be later than the current one and within `MAX_DEADLINE` of `block.timestamp`.
+    /// @notice Client extends the deadline of an unpaid milestone.
+    /// @dev Two invariants are enforced to prevent abuse:
+    ///   1. Chronology — the new deadline must remain strictly less than the next
+    ///      milestone's deadline (if any), so the strict ordering established at
+    ///      creation is preserved.
+    ///   2. Hard cap — the new deadline cannot exceed `agreement.createdAt + MAX_DEADLINE`.
+    ///      This prevents the client from indefinitely sliding the agreement deadline
+    ///      forward (which would deny the provider's `block.timestamp > agreement.deadline`
+    ///      dispute trigger).
     /// If the new deadline exceeds `agreement.deadline`, the agreement deadline is
-    /// lifted to match (so the provider's dispute window cannot open prematurely).
+    /// lifted to match.
     /// @param agreementId Agreement identifier.
     /// @param milestoneIndex Zero-based milestone index. Must not be paid.
     /// @param newDeadline New milestone deadline timestamp.
@@ -760,12 +772,19 @@ contract ServiceAgreement is
         whenNotPaused
     {
         Agreement storage agreement = _agreements[agreementId];
-        if (milestoneIndex >= agreement.milestones.length) revert MilestoneIndexOutOfBounds();
+        uint256 n = agreement.milestones.length;
+        if (milestoneIndex >= n) revert MilestoneIndexOutOfBounds();
 
         Milestone storage m = agreement.milestones[milestoneIndex];
         if (m.paid) revert MilestoneAlreadyPaid();
         if (newDeadline <= m.deadline) revert InvalidDeadline();
-        if (newDeadline > block.timestamp + MAX_DEADLINE) revert DurationTooLong();
+        // Hard cap relative to creation, not the moving block.timestamp,
+        // so repeated extensions cannot slide the deadline forward indefinitely.
+        if (newDeadline > uint256(agreement.createdAt) + MAX_DEADLINE) revert DurationTooLong();
+        // Chronology — must remain strictly before the next milestone, if any.
+        if (milestoneIndex + 1 < n && newDeadline >= agreement.milestones[milestoneIndex + 1].deadline) {
+            revert MilestonesNotChronological();
+        }
 
         m.deadline = uint64(newDeadline);
         // Keep agreement.deadline in sync so the provider's dispute window
@@ -782,9 +801,16 @@ contract ServiceAgreement is
     /// proposed team per their basis-point shares. Recipients claim with `withdraw`.
     /// @dev Approve and pay are merged into a single call so a malicious provider
     /// cannot front-run the client by inserting `raiseDispute` between the two.
+    /// @dev To defend against an evidence-swap front-run (provider replacing
+    /// `evidenceHash` between client review and tx mining), the client may pin the
+    /// approval to a specific evidence by passing a non-zero
+    /// `expectedEvidenceHash = keccak256(bytes(evidenceHash))`. Passing `bytes32(0)`
+    /// disables the commitment check.
     /// @param agreementId Agreement identifier.
     /// @param milestoneIndex Zero-based milestone index; must have evidence and be unpaid.
-    function approveMilestone(uint256 agreementId, uint256 milestoneIndex)
+    /// @param expectedEvidenceHash `keccak256(bytes(evidenceHash))` of the evidence the
+    ///        client is approving against, or `bytes32(0)` to skip the check.
+    function approveMilestone(uint256 agreementId, uint256 milestoneIndex, bytes32 expectedEvidenceHash)
         external
         validAgreement(agreementId)
         onlyClient(agreementId)
@@ -799,6 +825,9 @@ contract ServiceAgreement is
         Milestone storage m = agreement.milestones[milestoneIndex];
         if (m.paid) revert MilestoneAlreadyPaid();
         if (bytes(m.evidenceHash).length == 0) revert EvidenceMissing();
+        if (expectedEvidenceHash != bytes32(0) && keccak256(bytes(m.evidenceHash)) != expectedEvidenceHash) {
+            revert EvidenceCommitmentMismatch();
+        }
 
         m.completed = true;
         m.paid = true;
@@ -818,11 +847,19 @@ contract ServiceAgreement is
     }
 
     /// @notice Approves and pays multiple milestones in one call. Same semantics as
-    /// `approveMilestone`, applied to each index. Reverts and rolls back if any
-    /// listed milestone is paid, missing evidence, or out of bounds.
+    /// `approveMilestone`, applied to each index.
+    /// @dev `expectedEvidenceHashes` aligns with `milestoneIndices`. Each entry may be
+    ///      `bytes32(0)` to skip the commitment check for that milestone, or the
+    ///      `keccak256(bytes(evidenceHash))` the client expects. Pass an empty array
+    ///      to skip all commitment checks. Otherwise the array must align in length.
     /// @param agreementId Agreement identifier.
     /// @param milestoneIndices Zero-based milestone indices to approve.
-    function batchApproveMilestones(uint256 agreementId, uint256[] calldata milestoneIndices)
+    /// @param expectedEvidenceHashes Per-index commitments (or empty array to skip).
+    function batchApproveMilestones(
+        uint256 agreementId,
+        uint256[] calldata milestoneIndices,
+        bytes32[] calldata expectedEvidenceHashes
+    )
         external
         validAgreement(agreementId)
         onlyClient(agreementId)
@@ -832,6 +869,10 @@ contract ServiceAgreement is
         nonReentrant
     {
         if (milestoneIndices.length == 0) revert InvalidArrayLength();
+        bool checkCommitments = expectedEvidenceHashes.length != 0;
+        if (checkCommitments && expectedEvidenceHashes.length != milestoneIndices.length) {
+            revert ArrayLengthMismatch();
+        }
 
         Agreement storage agreement = _agreements[agreementId];
 
@@ -847,6 +888,12 @@ contract ServiceAgreement is
             Milestone storage m = agreement.milestones[idx];
             if (m.paid) revert MilestoneAlreadyPaid();
             if (bytes(m.evidenceHash).length == 0) revert EvidenceMissing();
+            if (checkCommitments) {
+                bytes32 expected = expectedEvidenceHashes[i];
+                if (expected != bytes32(0) && keccak256(bytes(m.evidenceHash)) != expected) {
+                    revert EvidenceCommitmentMismatch();
+                }
+            }
             m.completed = true;
             m.paid = true;
 
@@ -957,6 +1004,12 @@ contract ServiceAgreement is
     {
         Agreement storage agreement = _agreements[agreementId];
         if (!agreement.disputed) revert AgreementNotDisputed();
+        // An arbitrator who is also a participant of THIS agreement cannot resolve it
+        // (would let them award funds to themselves). The pool may include addresses
+        // that are participants of other agreements; this check is per-agreement.
+        if (msg.sender == agreement.client || msg.sender == agreement.provider) {
+            revert ArbitratorIsParticipant();
+        }
 
         uint256 remaining = agreement.remainingAmount;
         // Defensive: a disputed agreement should always have funds, but if state ever
@@ -1188,10 +1241,9 @@ contract ServiceAgreement is
     }
 
     /// @notice Returns the agreement's proposed team split. Indices align between
-    /// `members` and `shares`. If empty, no team has been proposed.
-    /// @dev The split is only active for distributions if `teamApproved` is true,
-    /// which can be checked separately via `getAgreementDetails` is not — use
-    /// off-chain reads of the public getters or extend with a dedicated view.
+    /// `members` and `shares`. If `members` is empty, no team has been proposed.
+    /// @dev The split only routes payouts when the client has approved it. Use
+    /// `isTeamApproved(agreementId)` to check the approval flag.
     function getTeam(uint256 agreementId)
         external
         view
@@ -1239,6 +1291,11 @@ contract ServiceAgreement is
     /// @notice Whether `user` has already submitted a rating for `agreementId`.
     function hasRated(uint256 agreementId, address user) external view validAgreement(agreementId) returns (bool) {
         return _agreements[agreementId].hasRated[user];
+    }
+
+    /// @notice Whether the client has approved the provider's proposed team split.
+    function isTeamApproved(uint256 agreementId) external view validAgreement(agreementId) returns (bool) {
+        return _agreements[agreementId].teamApproved;
     }
 
     // ============ Receive (used only via withdraw / refunds) ============

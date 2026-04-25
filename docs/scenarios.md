@@ -49,8 +49,12 @@ await serviceAgreement.connect(provider)
   .submitMilestoneEvidence(0, 0, "ipfs://QmDesignDeliverable...");
 
 // 3. Client reviews off-chain, then approves to release payment.
-//    This single tx marks complete + decrements escrow + credits provider and fee collector.
-await serviceAgreement.connect(client).approveMilestone(0, 0);
+//    Pin the approval to the evidence the client just reviewed, so the provider
+//    cannot swap it in between client read and tx mining.
+const m = await serviceAgreement.getMilestone(0, 0);
+const commitment = ethers.keccak256(ethers.toUtf8Bytes(m.evidenceHash));
+await serviceAgreement.connect(client).approveMilestone(0, 0, commitment);
+// Pass ethers.ZeroHash to opt out of the commitment check.
 
 // 4. Provider claims their funds.
 //    They get amount * (1 - PLATFORM_FEE_BPS / 10_000) = 0.99 ETH per milestone.
@@ -127,7 +131,7 @@ await serviceAgreement.connect(auditFirm)
   .submitMilestoneEvidence(0, 0, "ipfs://QmAuditReport...");
 
 // 4. Client approves; payment is credited.
-await serviceAgreement.connect(client).approveMilestone(0, 0);
+await serviceAgreement.connect(client).approveMilestone(0, 0, ethers.ZeroHash);
 
 // 5. Auditor and fee collector each claim their USDC.
 await serviceAgreement.connect(auditFirm).withdraw(USDC_ADDRESS);
@@ -170,7 +174,7 @@ await serviceAgreement.connect(client).approveTeam(0);
 // 4. Subsequent milestone approvals split per the team shares.
 //    All three team members withdraw individually.
 await serviceAgreement.connect(leadDev).submitMilestoneEvidence(0, 0, "ipfs://Q1");
-await serviceAgreement.connect(client).approveMilestone(0, 0);
+await serviceAgreement.connect(client).approveMilestone(0, 0, ethers.ZeroHash);
 
 await serviceAgreement.connect(leadDev).withdraw(ethers.ZeroAddress);
 await serviceAgreement.connect(designer).withdraw(ethers.ZeroAddress);
@@ -195,7 +199,7 @@ await serviceAgreement.connect(qaContractor).withdraw(ethers.ZeroAddress);
 
 // 2. Milestone 0 paid out happily.
 await serviceAgreement.connect(provider).submitMilestoneEvidence(0, 0, "ipfs://Q0");
-await serviceAgreement.connect(client).approveMilestone(0, 0);
+await serviceAgreement.connect(client).approveMilestone(0, 0, ethers.ZeroHash);
 await serviceAgreement.connect(provider).withdraw(ethers.ZeroAddress);
 
 // 3. Milestone 1: provider submits evidence, client disputes instead of approving.

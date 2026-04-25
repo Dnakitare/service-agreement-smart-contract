@@ -57,6 +57,11 @@
   },
   {
     "inputs": [],
+    "name": "ArbitratorIsParticipant",
+    "type": "error"
+  },
+  {
+    "inputs": [],
     "name": "ArrayLengthMismatch",
     "type": "error"
   },
@@ -104,6 +109,11 @@
   {
     "inputs": [],
     "name": "EthNotAcceptedForToken",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "EvidenceCommitmentMismatch",
     "type": "error"
   },
   {
@@ -1190,6 +1200,11 @@
         "internalType": "uint256",
         "name": "milestoneIndex",
         "type": "uint256"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "expectedEvidenceHash",
+        "type": "bytes32"
       }
     ],
     "name": "approveMilestone",
@@ -1247,6 +1262,11 @@
         "internalType": "uint256[]",
         "name": "milestoneIndices",
         "type": "uint256[]"
+      },
+      {
+        "internalType": "bytes32[]",
+        "name": "expectedEvidenceHashes",
+        "type": "bytes32[]"
       }
     ],
     "name": "batchApproveMilestones",
@@ -1765,6 +1785,25 @@
       }
     ],
     "name": "isArbitrator",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "agreementId",
+        "type": "uint256"
+      }
+    ],
+    "name": "isTeamApproved",
     "outputs": [
       {
         "internalType": "bool",

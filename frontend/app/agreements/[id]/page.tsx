@@ -6,6 +6,7 @@ import WalletGate from "@/components/WalletGate";
 import {
   AgreementDetails,
   MilestoneDetails,
+  evidenceCommitment,
   fmtAddr,
   fmtEth,
   fmtTime,
@@ -15,6 +16,7 @@ import {
   statusOf,
   ZERO,
 } from "@/lib/contract";
+import { ethers } from "ethers";
 
 export default function AgreementDetailPage() {
   return (
@@ -26,7 +28,12 @@ export default function AgreementDetailPage() {
 
 function AgreementDetail({ account }: { account: string }) {
   const params = useParams<{ id: string }>();
-  const id = Number(params.id);
+  let id: bigint;
+  try {
+    id = BigInt(params.id);
+  } catch {
+    return <div className="text-red-400">Invalid agreement ID: {String(params.id)}</div>;
+  }
   const router = useRouter();
 
   const [agreement, setAgreement] = useState<AgreementDetails | null>(null);
@@ -135,8 +142,20 @@ function AgreementDetail({ account }: { account: string }) {
                 }
                 onApprove={() =>
                   withTx("approveMilestone", async () => {
+                    // Pin the approval to the evidence the client just reviewed,
+                    // so the provider cannot front-run with submitMilestoneEvidence.
+                    const commitment = m.evidenceHash
+                      ? evidenceCommitment(m.evidenceHash)
+                      : ethers.ZeroHash;
+                    const proceed = window.confirm(
+                      `About to approve milestone #${m.index}.\n\n` +
+                        `Amount:   ${fmtEth(m.amount)}\n` +
+                        `Evidence: ${m.evidenceHash || "(none)"}\n\n` +
+                        `This will pay the provider (or proposed team if approved) and is final.`
+                    );
+                    if (!proceed) throw new Error("cancelled");
                     const c = await getWriteContract();
-                    const tx = await c.approveMilestone(id, m.index);
+                    const tx = await c.approveMilestone(id, m.index, commitment);
                     await tx.wait();
                   })
                 }
@@ -185,14 +204,15 @@ function AgreementDetail({ account }: { account: string }) {
           <button
             disabled={busy}
             className="px-3 py-2 rounded bg-zinc-700 hover:bg-zinc-600 text-white text-sm"
-            onClick={() =>
-              withTx("cancelAgreement", async () => {
-                const reason = prompt("Cancellation reason?") ?? "";
+            onClick={() => {
+              const reason = window.prompt("Cancellation reason?");
+              if (reason === null || reason.trim() === "") return;
+              return withTx("cancelAgreement", async () => {
                 const c = await getWriteContract();
                 const tx = await c.cancelAgreement(id, reason);
                 await tx.wait();
-              })
-            }
+              });
+            }}
           >
             Cancel (within 24h, no paid milestones)
           </button>

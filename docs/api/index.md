@@ -305,6 +305,18 @@ error ActionAlreadyScheduled()
 error TooManyArbitrators()
 ```
 
+### EvidenceCommitmentMismatch
+
+```solidity
+error EvidenceCommitmentMismatch()
+```
+
+### ArbitratorIsParticipant
+
+```solidity
+error ArbitratorIsParticipant()
+```
+
 ### MAX_MILESTONES
 
 ```solidity
@@ -408,6 +420,10 @@ struct Milestone {
 ```
 
 ### Agreement
+
+_IMPORTANT — append-only across upgrades. New fields must be added at the
+end (after the `hasRated` mapping). Reordering or inserting fields will
+silently misalign storage for agreements created on the previous layout._
 
 ```solidity
 struct Agreement {
@@ -1064,10 +1080,18 @@ the arbitrator will resolve against._
 function extendMilestoneDeadline(uint256 agreementId, uint256 milestoneIndex, uint256 newDeadline) external
 ```
 
-Client extends the deadline of an unpaid milestone. The new deadline
-must be later than the current one and within `MAX_DEADLINE` of `block.timestamp`.
+Client extends the deadline of an unpaid milestone.
+
+_Two invariants are enforced to prevent abuse:
+  1. Chronology — the new deadline must remain strictly less than the next
+     milestone's deadline (if any), so the strict ordering established at
+     creation is preserved.
+  2. Hard cap — the new deadline cannot exceed `agreement.createdAt + MAX_DEADLINE`.
+     This prevents the client from indefinitely sliding the agreement deadline
+     forward (which would deny the provider's `block.timestamp > agreement.deadline`
+     dispute trigger).
 If the new deadline exceeds `agreement.deadline`, the agreement deadline is
-lifted to match (so the provider's dispute window cannot open prematurely).
+lifted to match._
 
 #### Parameters
 
@@ -1080,7 +1104,7 @@ lifted to match (so the provider's dispute window cannot open prematurely).
 ### approveMilestone
 
 ```solidity
-function approveMilestone(uint256 agreementId, uint256 milestoneIndex) external
+function approveMilestone(uint256 agreementId, uint256 milestoneIndex, bytes32 expectedEvidenceHash) external
 ```
 
 Client approves a milestone, atomically marking it complete and
@@ -1089,7 +1113,12 @@ collector; the remainder goes to the provider — or, if `teamApproved`, to the
 proposed team per their basis-point shares. Recipients claim with `withdraw`.
 
 _Approve and pay are merged into a single call so a malicious provider
-cannot front-run the client by inserting `raiseDispute` between the two._
+cannot front-run the client by inserting `raiseDispute` between the two.
+To defend against an evidence-swap front-run (provider replacing
+`evidenceHash` between client review and tx mining), the client may pin the
+approval to a specific evidence by passing a non-zero
+`expectedEvidenceHash = keccak256(bytes(evidenceHash))`. Passing `bytes32(0)`
+disables the commitment check._
 
 #### Parameters
 
@@ -1097,16 +1126,21 @@ cannot front-run the client by inserting `raiseDispute` between the two._
 | ---- | ---- | ----------- |
 | agreementId | uint256 | Agreement identifier. |
 | milestoneIndex | uint256 | Zero-based milestone index; must have evidence and be unpaid. |
+| expectedEvidenceHash | bytes32 | `keccak256(bytes(evidenceHash))` of the evidence the        client is approving against, or `bytes32(0)` to skip the check. |
 
 ### batchApproveMilestones
 
 ```solidity
-function batchApproveMilestones(uint256 agreementId, uint256[] milestoneIndices) external
+function batchApproveMilestones(uint256 agreementId, uint256[] milestoneIndices, bytes32[] expectedEvidenceHashes) external
 ```
 
 Approves and pays multiple milestones in one call. Same semantics as
-`approveMilestone`, applied to each index. Reverts and rolls back if any
-listed milestone is paid, missing evidence, or out of bounds.
+`approveMilestone`, applied to each index.
+
+_`expectedEvidenceHashes` aligns with `milestoneIndices`. Each entry may be
+     `bytes32(0)` to skip the commitment check for that milestone, or the
+     `keccak256(bytes(evidenceHash))` the client expects. Pass an empty array
+     to skip all commitment checks. Otherwise the array must align in length._
 
 #### Parameters
 
@@ -1114,6 +1148,7 @@ listed milestone is paid, missing evidence, or out of bounds.
 | ---- | ---- | ----------- |
 | agreementId | uint256 | Agreement identifier. |
 | milestoneIndices | uint256[] | Zero-based milestone indices to approve. |
+| expectedEvidenceHashes | bytes32[] | Per-index commitments (or empty array to skip). |
 
 ### _markCompletedIfFinal
 
@@ -1330,11 +1365,10 @@ function getTeam(uint256 agreementId) external view returns (address[] members, 
 ```
 
 Returns the agreement's proposed team split. Indices align between
-`members` and `shares`. If empty, no team has been proposed.
+`members` and `shares`. If `members` is empty, no team has been proposed.
 
-_The split is only active for distributions if `teamApproved` is true,
-which can be checked separately via `getAgreementDetails` is not — use
-off-chain reads of the public getters or extend with a dedicated view._
+_The split only routes payouts when the client has approved it. Use
+`isTeamApproved(agreementId)` to check the approval flag._
 
 ### getUserAgreements
 
@@ -1387,6 +1421,14 @@ function hasRated(uint256 agreementId, address user) external view returns (bool
 ```
 
 Whether `user` has already submitted a rating for `agreementId`.
+
+### isTeamApproved
+
+```solidity
+function isTeamApproved(uint256 agreementId) external view returns (bool)
+```
+
+Whether the client has approved the provider's proposed team split.
 
 ### receive
 

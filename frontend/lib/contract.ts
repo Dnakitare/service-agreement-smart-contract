@@ -8,6 +8,11 @@ import abi from "./abi.json";
 export const CONTRACT_ADDRESS =
   (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS as `0x${string}`) ?? "";
 
+// Optional chain-id pin. Recommended in production. Ex. for Hardhat: 31337.
+export const EXPECTED_CHAIN_ID = process.env.NEXT_PUBLIC_CHAIN_ID
+  ? BigInt(process.env.NEXT_PUBLIC_CHAIN_ID)
+  : null;
+
 declare global {
   interface Window {
     ethereum?: any;
@@ -25,9 +30,22 @@ export function getProvider() {
   return new BrowserProvider(window.ethereum);
 }
 
+export async function assertExpectedChain(): Promise<void> {
+  if (EXPECTED_CHAIN_ID === null) return;
+  const provider = getProvider();
+  const network = await provider.getNetwork();
+  if (network.chainId !== EXPECTED_CHAIN_ID) {
+    throw new Error(
+      `Wrong network: wallet is on chainId ${network.chainId}, this dapp expects ${EXPECTED_CHAIN_ID}. ` +
+        `Switch your wallet's network and reload.`
+    );
+  }
+}
+
 export async function getSigner(): Promise<JsonRpcSigner> {
   const provider = getProvider();
   await provider.send("eth_requestAccounts", []);
+  await assertExpectedChain();
   return provider.getSigner();
 }
 
@@ -122,4 +140,9 @@ export function fmtAddr(addr: string): string {
 export function fmtTime(unix: bigint | number): string {
   const ts = typeof unix === "bigint" ? Number(unix) : unix;
   return new Date(ts * 1000).toLocaleString();
+}
+
+/// Compute keccak256(bytes(evidenceHash)) for the on-chain commitment check.
+export function evidenceCommitment(evidenceHash: string): string {
+  return ethers.keccak256(ethers.toUtf8Bytes(evidenceHash));
 }

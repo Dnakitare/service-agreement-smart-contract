@@ -6,6 +6,42 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-04-25
+
+### Added
+- **Evidence commitment on approval (M-1 hardening).** `approveMilestone` now takes
+  a third argument `bytes32 expectedEvidenceHash`. If non-zero, the contract requires
+  `keccak256(bytes(milestone.evidenceHash)) == expectedEvidenceHash`; otherwise it
+  reverts with `EvidenceCommitmentMismatch`. Pass `bytes32(0)` to opt out of the check.
+  `batchApproveMilestones` takes a parallel `bytes32[] expectedEvidenceHashes` array
+  (or empty to skip all checks). Closes a front-run window where a malicious provider
+  could swap evidence between client review and tx mining.
+- **Arbitrator self-deal block (M-3 hardening).** `resolveDispute` now reverts with
+  `ArbitratorIsParticipant` if the calling arbitrator is also the client or provider
+  of the disputed agreement.
+- **`isTeamApproved(id)` view** for integrators to check approval state directly.
+
+### Changed
+- **Breaking:** `approveMilestone(id, idx)` → `approveMilestone(id, idx, expectedEvidenceHash)`.
+- **Breaking:** `batchApproveMilestones(id, idxs)` → `batchApproveMilestones(id, idxs, expectedHashes)`.
+- **`extendMilestoneDeadline` chronology + cap (M-2 hardening).** New deadlines must
+  remain strictly less than the next milestone's deadline. The hard cap is now relative
+  to `agreement.createdAt`, not `block.timestamp`, so the client cannot indefinitely
+  slide the deadline forward to deny the provider's dispute trigger.
+
+### Frontend
+- Header now displays the contract address and the wallet's chainId vs the expected one
+  (`NEXT_PUBLIC_CHAIN_ID`). Mismatched chain blocks writes (H2 hardening).
+- `Header` listens for `chainChanged` and reloads on switch (L2 hardening).
+- Approve-milestone confirms in-page and pins the evidence commitment.
+- Create form shows a tx summary before signing (M1 hardening).
+- Cancel-agreement bails on null/empty reason (M2 hardening).
+- Agreement IDs parsed as `BigInt` (L4 hardening).
+
+### Security
+- Closed all findings from the third adversarial review (3 medium, several lows). 0 critical / 0 high.
+- 101 tests passing, 0 Slither findings.
+
 ## [0.3.0] — 2026-04-25
 
 ### Added

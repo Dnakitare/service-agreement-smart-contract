@@ -321,7 +321,7 @@ describe("ServiceAgreement", function () {
 
     it("submits evidence, completes, and credits the provider via pull", async () => {
       await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "QmA");
-      await serviceAgreement.connect(client).approveMilestone(agreementId, 0);
+      await serviceAgreement.connect(client).approveMilestone(agreementId, 0, ethers.ZeroHash);
 
       const amount = ethers.parseEther("0.5");
       const fee = (amount * FEE_BPS) / BPS;
@@ -332,7 +332,7 @@ describe("ServiceAgreement", function () {
 
     it("requires evidence before approval", async () => {
       await expect(
-        serviceAgreement.connect(client).approveMilestone(agreementId, 0)
+        serviceAgreement.connect(client).approveMilestone(agreementId, 0, ethers.ZeroHash)
       ).to.be.revertedWithCustomError(serviceAgreement, "EvidenceMissing");
     });
 
@@ -344,16 +344,16 @@ describe("ServiceAgreement", function () {
 
     it("rejects re-approval of a paid milestone", async () => {
       await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "QmA");
-      await serviceAgreement.connect(client).approveMilestone(agreementId, 0);
+      await serviceAgreement.connect(client).approveMilestone(agreementId, 0, ethers.ZeroHash);
       await expect(
-        serviceAgreement.connect(client).approveMilestone(agreementId, 0)
+        serviceAgreement.connect(client).approveMilestone(agreementId, 0, ethers.ZeroHash)
       ).to.be.revertedWithCustomError(serviceAgreement, "MilestoneAlreadyPaid");
     });
 
     it("marks the agreement complete when the final milestone is paid", async () => {
       for (const i of [0, 1]) {
         await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, i, `Q${i}`);
-        await serviceAgreement.connect(client).approveMilestone(agreementId, i);
+        await serviceAgreement.connect(client).approveMilestone(agreementId, i, ethers.ZeroHash);
       }
       const a = await serviceAgreement.getAgreementDetails(agreementId);
       expect(a.completed).to.be.true;
@@ -363,24 +363,45 @@ describe("ServiceAgreement", function () {
       await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "Q");
       await serviceAgreement.connect(client).raiseDispute(agreementId, "x");
       await expect(
-        serviceAgreement.connect(client).approveMilestone(agreementId, 0)
+        serviceAgreement.connect(client).approveMilestone(agreementId, 0, ethers.ZeroHash)
       ).to.be.revertedWithCustomError(serviceAgreement, "AgreementClosed");
     });
 
-    it("extends a milestone deadline", async () => {
+    it("extends the last milestone's deadline", async () => {
       const t = await chainNow();
       const newDeadline = t + 5 * 86400;
       await expect(
-        serviceAgreement.connect(client).extendMilestoneDeadline(agreementId, 0, newDeadline)
+        serviceAgreement.connect(client).extendMilestoneDeadline(agreementId, 1, newDeadline)
       )
         .to.emit(serviceAgreement, "MilestoneDeadlineExtended")
-        .withArgs(agreementId, 0, newDeadline);
+        .withArgs(agreementId, 1, newDeadline);
     });
 
     it("rejects extending to an earlier deadline", async () => {
       await expect(
         serviceAgreement.connect(client).extendMilestoneDeadline(agreementId, 0, 1)
       ).to.be.revertedWithCustomError(serviceAgreement, "InvalidDeadline");
+    });
+
+    it("rejects extending milestone i past milestone i+1's deadline (chronology)", async () => {
+      // milestones are at +1d and +2d. Try to push milestone 0 to +5d.
+      const t = await chainNow();
+      await expect(
+        serviceAgreement.connect(client).extendMilestoneDeadline(agreementId, 0, t + 5 * 86400)
+      ).to.be.revertedWithCustomError(serviceAgreement, "MilestonesNotChronological");
+    });
+
+    it("caps extension at createdAt + MAX_DEADLINE (no indefinite slide)", async () => {
+      // Extend to just under MAX_DEADLINE from createdAt.
+      const a = await serviceAgreement.getAgreementDetails(agreementId);
+      const cap = Number(a.createdAt) + 365 * 86400;
+      // Acceptable: == cap.
+      await serviceAgreement.connect(client).extendMilestoneDeadline(agreementId, 1, cap);
+      // After waiting a day, attempting to push past createdAt + MAX_DEADLINE must revert.
+      await time.increase(86400);
+      await expect(
+        serviceAgreement.connect(client).extendMilestoneDeadline(agreementId, 1, cap + 1)
+      ).to.be.revertedWithCustomError(serviceAgreement, "DurationTooLong");
     });
   });
 
@@ -404,7 +425,7 @@ describe("ServiceAgreement", function () {
     });
 
     it("credits provider and fee collector for batched releases", async () => {
-      await serviceAgreement.connect(client).batchApproveMilestones(agreementId, [0, 1]);
+      await serviceAgreement.connect(client).batchApproveMilestones(agreementId, [0, 1], []);
       const total = amounts[0] + amounts[1];
       const fee = (total * FEE_BPS) / BPS;
       const net = total - fee;
@@ -413,15 +434,15 @@ describe("ServiceAgreement", function () {
     });
 
     it("rejects double-release in a batch", async () => {
-      await serviceAgreement.connect(client).batchApproveMilestones(agreementId, [0]);
+      await serviceAgreement.connect(client).batchApproveMilestones(agreementId, [0], []);
       await expect(
-        serviceAgreement.connect(client).batchApproveMilestones(agreementId, [0])
+        serviceAgreement.connect(client).batchApproveMilestones(agreementId, [0], [])
       ).to.be.revertedWithCustomError(serviceAgreement, "MilestoneAlreadyPaid");
     });
 
     it("rejects empty batch", async () => {
       await expect(
-        serviceAgreement.connect(client).batchApproveMilestones(agreementId, [])
+        serviceAgreement.connect(client).batchApproveMilestones(agreementId, [], [])
       ).to.be.revertedWithCustomError(serviceAgreement, "InvalidArrayLength");
     });
   });
@@ -459,7 +480,7 @@ describe("ServiceAgreement", function () {
 
     it("rejects cancellation if a milestone has been paid", async () => {
       await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "Q");
-      await serviceAgreement.connect(client).approveMilestone(agreementId, 0);
+      await serviceAgreement.connect(client).approveMilestone(agreementId, 0, ethers.ZeroHash);
       await expect(
         serviceAgreement.connect(client).cancelAgreement(agreementId, "x")
       ).to.be.revertedWithCustomError(serviceAgreement, "AgreementClosed");
@@ -581,7 +602,7 @@ describe("ServiceAgreement", function () {
 
     it("submits rating after completion", async () => {
       await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "Q");
-      await serviceAgreement.connect(client).approveMilestone(agreementId, 0);
+      await serviceAgreement.connect(client).approveMilestone(agreementId, 0, ethers.ZeroHash);
 
       await serviceAgreement.connect(client).submitRating(agreementId, provider.address, 5);
       const r = await serviceAgreement.getUserRating(provider.address);
@@ -593,7 +614,7 @@ describe("ServiceAgreement", function () {
 
     it("rejects double rating from the same address", async () => {
       await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "Q");
-      await serviceAgreement.connect(client).approveMilestone(agreementId, 0);
+      await serviceAgreement.connect(client).approveMilestone(agreementId, 0, ethers.ZeroHash);
 
       await serviceAgreement.connect(client).submitRating(agreementId, provider.address, 5);
       await expect(
@@ -603,7 +624,7 @@ describe("ServiceAgreement", function () {
 
     it("rejects out-of-range scores", async () => {
       await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "Q");
-      await serviceAgreement.connect(client).approveMilestone(agreementId, 0);
+      await serviceAgreement.connect(client).approveMilestone(agreementId, 0, ethers.ZeroHash);
       await expect(
         serviceAgreement.connect(client).submitRating(agreementId, provider.address, 0)
       ).to.be.revertedWithCustomError(serviceAgreement, "InvalidRating");
@@ -614,7 +635,7 @@ describe("ServiceAgreement", function () {
 
     it("rejects self-rating", async () => {
       await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "Q");
-      await serviceAgreement.connect(client).approveMilestone(agreementId, 0);
+      await serviceAgreement.connect(client).approveMilestone(agreementId, 0, ethers.ZeroHash);
       await expect(
         serviceAgreement.connect(client).submitRating(agreementId, client.address, 5)
       ).to.be.revertedWithCustomError(serviceAgreement, "CannotRateSelf");
@@ -667,7 +688,7 @@ describe("ServiceAgreement", function () {
       await serviceAgreement.connect(client).approveTeam(agreementId);
 
       await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "Q");
-      await serviceAgreement.connect(client).approveMilestone(agreementId, 0);
+      await serviceAgreement.connect(client).approveMilestone(agreementId, 0, ethers.ZeroHash);
 
       const fee = (total * FEE_BPS) / BPS;
       const net = total - fee;
@@ -690,7 +711,7 @@ describe("ServiceAgreement", function () {
       // No approveTeam call.
 
       await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "Q");
-      await serviceAgreement.connect(client).approveMilestone(agreementId, 0);
+      await serviceAgreement.connect(client).approveMilestone(agreementId, 0, ethers.ZeroHash);
 
       const fee = (total * FEE_BPS) / BPS;
       const net = total - fee;
@@ -756,7 +777,7 @@ describe("ServiceAgreement", function () {
         { value: ethers.parseEther("1") }
       );
       await serviceAgreement.connect(provider).submitMilestoneEvidence(0, 0, "Q");
-      await serviceAgreement.connect(client).approveMilestone(0, 0);
+      await serviceAgreement.connect(client).approveMilestone(0, 0, ethers.ZeroHash);
 
       const fee = (ethers.parseEther("1") * FEE_BPS) / BPS;
       const net = ethers.parseEther("1") - fee;
@@ -794,7 +815,7 @@ describe("ServiceAgreement", function () {
       );
       await serviceAgreement.connect(client).approveTeam(0);
       await serviceAgreement.connect(provider).submitMilestoneEvidence(0, 0, "Q");
-      await serviceAgreement.connect(client).approveMilestone(0, 0);
+      await serviceAgreement.connect(client).approveMilestone(0, 0, ethers.ZeroHash);
 
       // The honest team member can still withdraw despite the refuser.
       const before = await ethers.provider.getBalance(addrs[0].address);
@@ -930,7 +951,7 @@ describe("ServiceAgreement", function () {
       await checkInvariant();
 
       await serviceAgreement.connect(provider).submitMilestoneEvidence(0, 0, "Q");
-      await serviceAgreement.connect(client).approveMilestone(0, 0);
+      await serviceAgreement.connect(client).approveMilestone(0, 0, ethers.ZeroHash);
       await checkInvariant();
 
       await serviceAgreement.connect(provider).withdraw(ZERO);
@@ -940,7 +961,7 @@ describe("ServiceAgreement", function () {
       await checkInvariant();
 
       await serviceAgreement.connect(provider).submitMilestoneEvidence(0, 1, "Q");
-      await serviceAgreement.connect(client).approveMilestone(0, 1);
+      await serviceAgreement.connect(client).approveMilestone(0, 1, ethers.ZeroHash);
       await checkInvariant();
 
       await serviceAgreement.connect(provider).withdraw(ZERO);
@@ -1086,7 +1107,7 @@ describe("ServiceAgreement", function () {
         0, provider.address, dueDates, [ethers.parseEther("1")], tokenAddr
       );
       await serviceAgreement.connect(provider).submitMilestoneEvidence(0, 0, "Q");
-      await serviceAgreement.connect(client).approveMilestone(0, 0);
+      await serviceAgreement.connect(client).approveMilestone(0, 0, ethers.ZeroHash);
 
       const fee = (ethers.parseEther("1") * FEE_BPS) / BPS;
       const net = ethers.parseEther("1") - fee;
@@ -1365,6 +1386,106 @@ describe("ServiceAgreement", function () {
     });
   });
 
+  describe("Evidence commitment (third-pass M-1)", () => {
+    let agreementId;
+    const total = ethers.parseEther("1");
+
+    beforeEach(async () => {
+      const dueDates = await futureTimes(86400);
+      await serviceAgreement.connect(client).createAgreementFromTemplate(
+        0, provider.address, dueDates, [total], ZERO, { value: total }
+      );
+      agreementId = 0;
+      await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "ipfs://X");
+    });
+
+    it("approves when expected hash matches", async () => {
+      const expected = ethers.keccak256(ethers.toUtf8Bytes("ipfs://X"));
+      await expect(
+        serviceAgreement.connect(client).approveMilestone(agreementId, 0, expected)
+      ).to.emit(serviceAgreement, "MilestoneApproved");
+    });
+
+    it("rejects when expected hash mismatches (front-run swap simulation)", async () => {
+      // Provider front-runs by overwriting evidence after the client read it.
+      await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "ipfs://Y");
+      const clientExpected = ethers.keccak256(ethers.toUtf8Bytes("ipfs://X"));
+      await expect(
+        serviceAgreement.connect(client).approveMilestone(agreementId, 0, clientExpected)
+      ).to.be.revertedWithCustomError(serviceAgreement, "EvidenceCommitmentMismatch");
+    });
+
+    it("ZeroHash opts out of the commitment check", async () => {
+      await serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "ipfs://Z");
+      await expect(
+        serviceAgreement.connect(client).approveMilestone(agreementId, 0, ethers.ZeroHash)
+      ).to.emit(serviceAgreement, "MilestoneApproved");
+    });
+
+    it("batchApproveMilestones honors per-index commitments", async () => {
+      // 2-milestone agreement; commit one, opt out the other.
+      const dueDates = await futureTimes(86400, 172800);
+      await serviceAgreement.connect(client).createAgreementFromTemplate(
+        0, provider.address, dueDates,
+        [ethers.parseEther("0.5"), ethers.parseEther("0.5")],
+        ZERO, { value: total }
+      );
+      const id = 1;
+      await serviceAgreement.connect(provider).submitMilestoneEvidence(id, 0, "ipfs://A");
+      await serviceAgreement.connect(provider).submitMilestoneEvidence(id, 1, "ipfs://B");
+
+      // Provider front-runs milestone 0.
+      await serviceAgreement.connect(provider).submitMilestoneEvidence(id, 0, "ipfs://EVIL");
+
+      const expectedA = ethers.keccak256(ethers.toUtf8Bytes("ipfs://A"));
+      await expect(
+        serviceAgreement.connect(client).batchApproveMilestones(id, [0, 1], [expectedA, ethers.ZeroHash])
+      ).to.be.revertedWithCustomError(serviceAgreement, "EvidenceCommitmentMismatch");
+    });
+
+    it("batchApproveMilestones with empty commitments array skips all checks", async () => {
+      const dueDates = await futureTimes(86400, 172800);
+      await serviceAgreement.connect(client).createAgreementFromTemplate(
+        0, provider.address, dueDates,
+        [ethers.parseEther("0.5"), ethers.parseEther("0.5")],
+        ZERO, { value: total }
+      );
+      const id = 1;
+      await serviceAgreement.connect(provider).submitMilestoneEvidence(id, 0, "ipfs://A");
+      await serviceAgreement.connect(provider).submitMilestoneEvidence(id, 1, "ipfs://B");
+      await expect(
+        serviceAgreement.connect(client).batchApproveMilestones(id, [0, 1], [])
+      ).to.emit(serviceAgreement, "BatchMilestonesApproved");
+    });
+  });
+
+  describe("Arbitrator self-deal block (third-pass M-3)", () => {
+    it("an arbitrator who is also a participant cannot resolve their own dispute", async () => {
+      // Rotate the pool to include `client` as an arbitrator.
+      await scheduleAndExecute(
+        serviceAgreement,
+        owner,
+        await serviceAgreement.ACTION_SET_ARBITRATOR_POOL(),
+        ethers.AbiCoder.defaultAbiCoder().encode(["address[]"], [[arbitrator.address, client.address]])
+      );
+
+      const dueDates = await futureTimes(86400);
+      await serviceAgreement.connect(client).createAgreementFromTemplate(
+        0, provider.address, dueDates, [ethers.parseEther("1")], ZERO,
+        { value: ethers.parseEther("1") }
+      );
+      await serviceAgreement.connect(client).raiseDispute(0, "x");
+
+      // Client (also an arbitrator now) tries to resolve in their own favor.
+      await expect(
+        serviceAgreement.connect(client).resolveDispute(0, 0)
+      ).to.be.revertedWithCustomError(serviceAgreement, "ArbitratorIsParticipant");
+
+      // The independent arbitrator can still resolve.
+      await serviceAgreement.connect(arbitrator).resolveDispute(0, ethers.parseEther("0.5"));
+    });
+  });
+
   describe("Arbitrator pool cap", () => {
     it("rejects pools larger than MAX_ARBITRATORS", async () => {
       const pool = Array(11).fill(0).map((_, i) => addrs[i].address);
@@ -1395,7 +1516,7 @@ describe("ServiceAgreement", function () {
         { value: ethers.parseEther("1") }
       );
       await serviceAgreement.connect(provider).submitMilestoneEvidence(0, 0, "Q");
-      await serviceAgreement.connect(client).approveMilestone(0, 0);
+      await serviceAgreement.connect(client).approveMilestone(0, 0, ethers.ZeroHash);
 
       await serviceAgreement.connect(owner).pause();
 

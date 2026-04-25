@@ -50,6 +50,7 @@ try {
 | `MilestoneIndexOutOfBounds` | `submitMilestoneEvidence`, `approveMilestone`, `batchApproveMilestones`, `extendMilestoneDeadline`, `getMilestone` | Index `>= milestones.length`. | Validate index against `getMilestoneCount(id)`. |
 | `MilestoneAlreadyPaid` | `approveMilestone`, `batchApproveMilestones`, `extendMilestoneDeadline`, `submitMilestoneEvidence` | The milestone has already been paid out. With the merged approve+pay design, this also means it's already complete. | Re-fetch state; the milestone is finalized. |
 | `EvidenceMissing` | `approveMilestone`, `batchApproveMilestones` | Client tried to approve before the provider submitted evidence. | Show "Awaiting provider evidence" until `getMilestone(id, idx).evidenceHash !== ""`. |
+| `EvidenceCommitmentMismatch` | `approveMilestone`, `batchApproveMilestones` | The client passed `expectedEvidenceHash != bytes32(0)` and the on-chain evidence's keccak doesn't match. Typical cause: the provider front-ran with `submitMilestoneEvidence` to swap the evidence between the client's review and tx mining. | Treat as adversarial — re-fetch the evidence, surface a "evidence changed since review" warning, and require explicit re-confirmation from the user. |
 | `EvidenceEmpty` | `submitMilestoneEvidence` | Provider passed an empty string. | Validate the hash on the client side before sending the tx. |
 | `MilestonesNotChronological` | `_createAgreement` | Milestone deadlines are not strictly increasing. | Sort or validate at form time. |
 | `TooManyMilestones` | `createTemplate`, `updateTemplate`, `_createAgreement` (via `InvalidArrayLength`) | More than `MAX_MILESTONES` (20) milestones. | Cap the form at 20. |
@@ -102,6 +103,7 @@ try {
 | `TemplateNotFound` | `updateTemplate`, `createAgreementFromTemplate` | `templateId >= templateCount`. | Drive the dropdown from `templateCount`. |
 | `TemplateNotActive` | `createAgreementFromTemplate` | The template's `active` flag is false. | Hide inactive templates in the picker. |
 | `TooManyArbitrators` | `_setArbitratorPool` | New pool > `MAX_ARBITRATORS` (10). | Cap admin inputs. |
+| `ArbitratorIsParticipant` | `resolveDispute` | The arbitrator calling `resolveDispute` is also the client or provider of this specific agreement. | Have a different arbitrator from the pool resolve. |
 
 ---
 
