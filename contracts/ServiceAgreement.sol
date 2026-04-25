@@ -45,8 +45,6 @@ contract ServiceAgreement is
     error AgreementNotComplete();
     error DisputeAlreadyRaised();
     error MilestoneIndexOutOfBounds();
-    error MilestoneAlreadyCompleted();
-    error MilestoneNotCompleted();
     error MilestoneAlreadyPaid();
     error EvidenceMissing();
     error EvidenceEmpty();
@@ -72,6 +70,10 @@ contract ServiceAgreement is
     error TransferFailed();
     error InsufficientFunds();
     error InvalidActionType();
+    error NoTeamProposed();
+    error TeamNotApproved();
+    error NoDisputeGrounds();
+    error UpgradeNotRequested();
 
     // ============ Constants ============
 
@@ -114,10 +116,11 @@ contract ServiceAgreement is
         bool completed;
         bool disputed;
         bool cancelled;
+        bool teamApproved; // client has approved the provider's proposed team split
         address paymentToken; // ETH for native
         string terms;
         Milestone[] milestones;
-        address[] teamMembers;
+        address[] teamMembers; // proposed by provider
         uint256[] teamShares; // basis points, must sum to BASIS_POINTS
         mapping(address => bool) hasRated;
     }
@@ -176,8 +179,11 @@ contract ServiceAgreement is
     // Increases on agreement creation; decreases only when funds leave the contract.
     mapping(address => uint256) public totalObligations;
 
+    // Upgrade timelock: implementation address => earliest authorized upgrade time.
+    mapping(address => uint256) public upgradeRequestedAt;
+
     /// @dev Reserved for future upgrades. Decrement when adding new state variables.
-    uint256[40] private __gap;
+    uint256[39] private __gap;
 
     // ============ Events ============
 
@@ -191,15 +197,15 @@ contract ServiceAgreement is
         string terms
     );
     event MilestoneEvidenceSubmitted(uint256 indexed agreementId, uint256 indexed milestoneIndex, string evidenceHash);
-    event MilestoneCompleted(uint256 indexed agreementId, uint256 indexed milestoneIndex);
+    event MilestoneApproved(uint256 indexed agreementId, uint256 indexed milestoneIndex, uint256 amount, uint256 fee);
+    event BatchMilestonesApproved(uint256 indexed agreementId, uint256[] milestoneIndices, uint256 totalAmount, uint256 totalFee);
     event MilestoneDeadlineExtended(uint256 indexed agreementId, uint256 indexed milestoneIndex, uint256 newDeadline);
-    event PaymentReleased(uint256 indexed agreementId, uint256 indexed milestoneIndex, uint256 amount, uint256 fee);
-    event BatchPaymentReleased(uint256 indexed agreementId, uint256[] milestoneIndices, uint256 totalAmount, uint256 totalFee);
     event AgreementCancelled(uint256 indexed agreementId, address indexed initiator, string reason);
     event DisputeRaised(uint256 indexed agreementId, address indexed initiator, string reason);
     event DisputeResolved(uint256 indexed agreementId, uint256 amountToProvider, uint256 amountToClient);
     event RatingSubmitted(uint256 indexed agreementId, address indexed rater, address indexed rated, uint256 score);
-    event TeamMembersAdded(uint256 indexed agreementId, address[] members, uint256[] shares);
+    event TeamProposed(uint256 indexed agreementId, address[] members, uint256[] shares);
+    event TeamApproved(uint256 indexed agreementId);
     event TemplateCreated(uint256 indexed templateId, string name);
     event TemplateUpdated(uint256 indexed templateId, string name, bool active);
 
@@ -214,6 +220,8 @@ contract ServiceAgreement is
     event Withdrawn(address indexed token, address indexed recipient, uint256 amount);
     event SurplusWithdrawn(address indexed token, address indexed recipient, uint256 amount);
 
+    event UpgradeRequested(address indexed newImplementation, uint256 executableAt);
+    event UpgradeRequestCancelled(address indexed newImplementation);
     event ContractUpgraded(address indexed newImplementation);
 
     // ============ Modifiers ============
@@ -273,7 +281,27 @@ contract ServiceAgreement is
         emit FeeCollectorUpdated(address(0), feeCollector_);
     }
 
+    /// @notice Schedule an upgrade to a specific implementation. The upgrade itself
+    /// (via UUPSUpgradeable.upgradeToAndCall) becomes executable after TIMELOCK_DELAY.
+    /// Re-requesting for the same implementation overwrites the schedule.
+    function requestUpgrade(address newImplementation) external onlyOwner {
+        if (newImplementation == address(0)) revert ZeroAddress();
+        uint256 executableAt = block.timestamp + TIMELOCK_DELAY;
+        upgradeRequestedAt[newImplementation] = executableAt;
+        emit UpgradeRequested(newImplementation, executableAt);
+    }
+
+    function cancelUpgradeRequest(address newImplementation) external onlyOwner {
+        if (upgradeRequestedAt[newImplementation] == 0) revert ActionNotFound();
+        delete upgradeRequestedAt[newImplementation];
+        emit UpgradeRequestCancelled(newImplementation);
+    }
+
     function _authorizeUpgrade(address newImplementation) internal override onlyOwner {
+        uint256 executableAt = upgradeRequestedAt[newImplementation];
+        if (executableAt == 0) revert UpgradeNotRequested();
+        if (block.timestamp < executableAt) revert TimelockNotElapsed();
+        delete upgradeRequestedAt[newImplementation];
         emit ContractUpgraded(newImplementation);
     }
 
@@ -533,39 +561,58 @@ contract ServiceAgreement is
 
     // ============ Team payments ============
 
-    /// @notice Provider may declare a team payment split before the first milestone is paid.
-    /// Shares are basis points and must sum to BASIS_POINTS.
-    function addTeamMembers(
+    /// @notice Provider proposes a team payment split. Provider may re-propose
+    /// (overwriting the previous proposal) until the client approves it. Once
+    /// approved by `approveTeam`, the split is locked.
+    /// @dev Shares are basis points and must sum to BASIS_POINTS.
+    function proposeTeam(
         uint256 agreementId,
         address[] calldata members,
         uint256[] calldata shares
     ) external validAgreement(agreementId) onlyProvider(agreementId) active(agreementId) whenNotPaused {
         Agreement storage agreement = _agreements[agreementId];
-        if (agreement.teamMembers.length != 0) revert TeamAlreadySet();
+        if (agreement.teamApproved) revert TeamAlreadySet();
 
         uint256 n = members.length;
         if (n == 0) revert NoTeamMembers();
         if (n > MAX_TEAM_MEMBERS) revert TooManyTeamMembers();
         if (n != shares.length) revert ArrayLengthMismatch();
 
-        // Cannot reassign payments after any milestone has been paid out.
-        Milestone[] storage ms = agreement.milestones;
-        uint256 mLen = ms.length;
-        for (uint256 i = 0; i < mLen; i++) {
-            if (ms[i].paid) revert TeamAlreadySet();
-        }
-
         uint256 sum;
         for (uint256 i = 0; i < n; i++) {
             if (members[i] == address(0)) revert ZeroAddress();
             if (shares[i] == 0) revert InvalidShares();
             sum += shares[i];
-            agreement.teamMembers.push(members[i]);
-            agreement.teamShares.push(shares[i]);
         }
         if (sum != BASIS_POINTS) revert InvalidShares();
 
-        emit TeamMembersAdded(agreementId, members, shares);
+        // Overwrite any previous proposal.
+        delete agreement.teamMembers;
+        delete agreement.teamShares;
+        for (uint256 i = 0; i < n; i++) {
+            agreement.teamMembers.push(members[i]);
+            agreement.teamShares.push(shares[i]);
+        }
+
+        emit TeamProposed(agreementId, members, shares);
+    }
+
+    /// @notice Client approves the provider's most recent team proposal. After
+    /// approval, future milestone payouts are split among the proposed members.
+    /// Approval is final; provider cannot re-propose afterward.
+    function approveTeam(uint256 agreementId)
+        external
+        validAgreement(agreementId)
+        onlyClient(agreementId)
+        active(agreementId)
+        whenNotPaused
+    {
+        Agreement storage agreement = _agreements[agreementId];
+        if (agreement.teamApproved) revert TeamAlreadySet();
+        if (agreement.teamMembers.length == 0) revert NoTeamProposed();
+
+        agreement.teamApproved = true;
+        emit TeamApproved(agreementId);
     }
 
     // ============ Milestone lifecycle ============
@@ -581,29 +628,10 @@ contract ServiceAgreement is
         if (milestoneIndex >= agreement.milestones.length) revert MilestoneIndexOutOfBounds();
 
         Milestone storage m = agreement.milestones[milestoneIndex];
-        if (m.completed) revert MilestoneAlreadyCompleted();
+        if (m.paid) revert MilestoneAlreadyPaid();
         m.evidenceHash = evidenceHash;
 
         emit MilestoneEvidenceSubmitted(agreementId, milestoneIndex, evidenceHash);
-    }
-
-    function completeMilestone(uint256 agreementId, uint256 milestoneIndex)
-        external
-        validAgreement(agreementId)
-        onlyClient(agreementId)
-        active(agreementId)
-        whenNotPaused
-    {
-        Agreement storage agreement = _agreements[agreementId];
-        if (agreement.disputed) revert AgreementClosed();
-        if (milestoneIndex >= agreement.milestones.length) revert MilestoneIndexOutOfBounds();
-
-        Milestone storage m = agreement.milestones[milestoneIndex];
-        if (m.completed) revert MilestoneAlreadyCompleted();
-        if (bytes(m.evidenceHash).length == 0) revert EvidenceMissing();
-
-        m.completed = true;
-        emit MilestoneCompleted(agreementId, milestoneIndex);
     }
 
     function extendMilestoneDeadline(uint256 agreementId, uint256 milestoneIndex, uint256 newDeadline)
@@ -617,7 +645,7 @@ contract ServiceAgreement is
         if (milestoneIndex >= agreement.milestones.length) revert MilestoneIndexOutOfBounds();
 
         Milestone storage m = agreement.milestones[milestoneIndex];
-        if (m.completed) revert MilestoneAlreadyCompleted();
+        if (m.paid) revert MilestoneAlreadyPaid();
         if (newDeadline <= m.deadline) revert InvalidDeadline();
         if (newDeadline > block.timestamp + MAX_DEADLINE) revert DurationTooLong();
 
@@ -625,7 +653,11 @@ contract ServiceAgreement is
         emit MilestoneDeadlineExtended(agreementId, milestoneIndex, newDeadline);
     }
 
-    function releaseMilestonePayment(uint256 agreementId, uint256 milestoneIndex)
+    /// @notice Client approves a milestone and atomically releases its payment.
+    /// Marking a milestone complete and paying are a single tx so a malicious
+    /// provider cannot front-run the client's release with a `raiseDispute` to
+    /// force arbitration.
+    function approveMilestone(uint256 agreementId, uint256 milestoneIndex)
         external
         validAgreement(agreementId)
         onlyClient(agreementId)
@@ -638,9 +670,10 @@ contract ServiceAgreement is
         if (milestoneIndex >= agreement.milestones.length) revert MilestoneIndexOutOfBounds();
 
         Milestone storage m = agreement.milestones[milestoneIndex];
-        if (!m.completed) revert MilestoneNotCompleted();
         if (m.paid) revert MilestoneAlreadyPaid();
+        if (bytes(m.evidenceHash).length == 0) revert EvidenceMissing();
 
+        m.completed = true;
         m.paid = true;
 
         uint256 amount = m.amount;
@@ -654,10 +687,10 @@ contract ServiceAgreement is
         _credit(token, feeCollector, fee);
         _distributeToProvider(agreement, token, net);
 
-        emit PaymentReleased(agreementId, milestoneIndex, amount, fee);
+        emit MilestoneApproved(agreementId, milestoneIndex, amount, fee);
     }
 
-    function batchReleaseMilestonePayments(uint256 agreementId, uint256[] calldata milestoneIndices)
+    function batchApproveMilestones(uint256 agreementId, uint256[] calldata milestoneIndices)
         external
         validAgreement(agreementId)
         onlyClient(agreementId)
@@ -680,8 +713,9 @@ contract ServiceAgreement is
             if (idx >= mLen) revert MilestoneIndexOutOfBounds();
 
             Milestone storage m = agreement.milestones[idx];
-            if (!m.completed) revert MilestoneNotCompleted();
             if (m.paid) revert MilestoneAlreadyPaid();
+            if (bytes(m.evidenceHash).length == 0) revert EvidenceMissing();
+            m.completed = true;
             m.paid = true;
 
             uint256 amount = m.amount;
@@ -699,7 +733,7 @@ contract ServiceAgreement is
         _credit(token, feeCollector, totalFee);
         _distributeToProvider(agreement, token, totalNet);
 
-        emit BatchPaymentReleased(agreementId, milestoneIndices, totalAmount, totalFee);
+        emit BatchMilestonesApproved(agreementId, milestoneIndices, totalAmount, totalFee);
     }
 
     function _markCompletedIfFinal(Agreement storage agreement) internal {
@@ -745,6 +779,11 @@ contract ServiceAgreement is
 
     // ============ Dispute ============
 
+    /// @notice Raise a dispute. Either party may dispute, but with asymmetric rules:
+    ///   - The client may dispute at any time (their funds are at risk).
+    ///   - The provider may only dispute after the agreement deadline has elapsed,
+    ///     which prevents them from front-running the client's `approveMilestone`
+    ///     to force arbitration on work the client was about to pay for.
     function raiseDispute(uint256 agreementId, string calldata reason)
         external
         validAgreement(agreementId)
@@ -754,6 +793,9 @@ contract ServiceAgreement is
     {
         Agreement storage agreement = _agreements[agreementId];
         if (agreement.disputed) revert DisputeAlreadyRaised();
+        if (msg.sender == agreement.provider && block.timestamp <= agreement.deadline) {
+            revert NoDisputeGrounds();
+        }
         agreement.disputed = true;
         emit DisputeRaised(agreementId, msg.sender, reason);
     }
@@ -772,6 +814,9 @@ contract ServiceAgreement is
         if (!agreement.disputed) revert AgreementNotDisputed();
 
         uint256 remaining = agreement.remainingAmount;
+        // Defensive: a disputed agreement should always have funds, but if state ever
+        // drifts to remaining==0 we surface it instead of silently flipping completed.
+        if (remaining == 0) revert AgreementClosed();
         if (amountToProvider > remaining) revert InsufficientFunds();
 
         uint256 toClient = remaining - amountToProvider;
@@ -874,8 +919,14 @@ contract ServiceAgreement is
 
     function _distributeToProvider(Agreement storage agreement, address token, uint256 amount) internal {
         if (amount == 0) return;
+        // Until the client approves the team split, payouts go to the provider.
+        if (!agreement.teamApproved) {
+            _credit(token, agreement.provider, amount);
+            return;
+        }
         address[] storage members = agreement.teamMembers;
         uint256 n = members.length;
+        // teamApproved implies n > 0, but guard for completeness.
         if (n == 0) {
             _credit(token, agreement.provider, amount);
             return;

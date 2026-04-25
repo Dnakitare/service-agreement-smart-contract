@@ -12,34 +12,40 @@ The provider may optionally split payments across a team (up to 10 members) by b
 
 ## Design properties
 
-The contract is built around four properties that the test suite enforces:
+The contract is built around six properties that the test suite enforces:
 
-1. **Pull payments** — `releaseMilestonePayment`, `resolveDispute`, `cancelAgreement` and `addTeamMembers` never push ETH or tokens. They credit `pendingWithdrawals[token][recipient]`. Recipients call `withdraw(token)` to claim. A single bad recipient (e.g. a contract that reverts on ETH receive) cannot block any other recipient.
+1. **Pull payments** — `approveMilestone`, `resolveDispute`, `cancelAgreement` and `proposeTeam` never push ETH or tokens. They credit `pendingWithdrawals[token][recipient]`. Recipients call `withdraw(token)` to claim. A single bad recipient (e.g. a contract that reverts on ETH receive) cannot block any other recipient.
 
-2. **Real timelock** — every privileged config change (rotating the arbitrator pool, changing the fee collector, whitelisting/removing a token) goes through `scheduleAction → executeAction` with a 2-day delay. There is no immediate-execute bypass. The owner cannot whitelist a token and use it in the same block.
+2. **Real timelock on config + upgrades** — every privileged config change (rotating the arbitrator pool, changing the fee collector, whitelisting/removing a token) and every implementation upgrade goes through a 2-day delay. There is no immediate-execute bypass. A compromised owner key cannot rug funds within the timelock window.
 
-3. **Solvency invariant** — for every accepted token, the contract maintains `balance(token) >= totalObligations[token]` at all times. `withdrawSurplus` can only ever transfer the strict surplus above obligations. There is no `emergencyWithdraw` that drains escrow.
+3. **Solvency invariant** — for every accepted token, the contract maintains `balance(token) >= totalObligations[token]` at all times. `withdrawSurplus` can only ever transfer the strict surplus above obligations.
 
-4. **No fee-on-transfer / rebasing tokens** — `_pullToken` checks that the contract received exactly the requested amount and reverts with `FeeOnTransferNotSupported` otherwise. This keeps the solvency invariant exact and reflects the assumption that whitelisted tokens are standard ERC20s.
+4. **No fee-on-transfer / rebasing tokens** — `_pullToken` checks that the contract received exactly the requested amount and reverts with `FeeOnTransferNotSupported` otherwise.
+
+5. **Atomic milestone approve + pay** — there is no separate "mark complete" step. `approveMilestone` simultaneously marks the milestone complete, decrements escrow, and credits the recipients. This eliminates the front-running window where a malicious provider could `raiseDispute` between the client's `completeMilestone` and `releaseMilestonePayment` calls. It also closes the cancel-after-completion grift where a client could mark work complete then cancel within the 24h window.
+
+6. **Two-sided team payment authorization** — the provider may `proposeTeam(members, shares)` but no payouts are split until the client calls `approveTeam`. A malicious provider therefore cannot redirect funds the client has already escrowed.
 
 ## Lifecycle
 
 ```
-                          ┌─ submitMilestoneEvidence ──┐
-client funds agreement ──>│                            ├──> client.completeMilestone
-                          └────────────────────────────┘            │
-                                                                    ▼
-                                                      client.releaseMilestonePayment
-                                                                    │
+client funds agreement ─> provider.submitMilestoneEvidence ─> client.approveMilestone
+                                                                        │
                                             credits pendingWithdrawals[token][provider]
                                             credits pendingWithdrawals[token][feeCollector]
-                                                                    │
-                                          provider.withdraw(token), feeCollector.withdraw(token)
+                                                                        │
+                                            provider.withdraw / feeCollector.withdraw
 ```
 
-Either party may call `raiseDispute` at any time before the agreement is completed or cancelled. The arbitrator then calls `resolveDispute(agreementId, amountToProvider)` to split the remaining escrow.
+`approveMilestone` is a single atomic step that marks the milestone complete, decrements escrow, and credits the recipients. `batchApproveMilestones` does the same for many milestones in one call.
 
-The client may `cancelAgreement` within 24 hours of creation, but only if no milestone has been paid and no dispute is active. The full remaining balance is credited back to the client.
+**Disputes.** The client may call `raiseDispute` at any time. The provider may only call `raiseDispute` after the agreement deadline has passed — this prevents the provider from front-running a release tx to force arbitration. The arbitrator then calls `resolveDispute(agreementId, amountToProvider)` to split the remaining escrow; the rest is refunded to the client.
+
+**Cancellation.** The client may `cancelAgreement` within 24 hours of creation, but only if no milestone has been paid and no dispute is active. The full remaining balance is credited back to the client.
+
+**Team payments.** The provider may `proposeTeam(members, shares)` (basis points summing to 10,000, max 10 members). The client must then `approveTeam` for the split to take effect; until approved, payouts go to the provider. The provider may re-propose to overwrite the previous proposal up until approval. After approval, the split is locked.
+
+**Upgrades.** The owner calls `requestUpgrade(newImplementation)`, waits 2 days, then calls `upgradeToAndCall`. `_authorizeUpgrade` validates that the implementation matches a request whose timelock has elapsed; otherwise it reverts. Upgrade requests can be cancelled.
 
 ## Layout
 
