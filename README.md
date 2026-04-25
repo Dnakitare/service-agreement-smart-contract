@@ -89,8 +89,20 @@ slither.config.json
 ```bash
 npm install
 npm run compile
-npm test
+npm test                # Hardhat unit tests (101)
+npm run coverage        # Solidity coverage
+npm run test:gas        # Hardhat tests with gas reporter
+npm run docs            # Regenerate API docs from NatSpec
+npm run storage:check   # Verify storage layout snapshot
 ```
+
+The repo also has a Foundry suite for invariant fuzzing:
+
+```bash
+forge test              # 256 runs × 32 calls each, four invariants
+```
+
+If `forge` isn't installed: `curl -L https://foundry.paradigm.xyz | bash && foundryup`.
 
 ## Deploy
 
@@ -114,8 +126,12 @@ PROXY_ADDRESS=0x... npx hardhat run scripts/upgrade.js --network sepolia
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on every push and PR:
 
-- `npm test` (Hardhat test suite)
+- `npm test` (101 Hardhat unit tests)
 - `npm run coverage` (solidity-coverage; report uploaded as artifact)
+- `npm run test:gas` (gas report uploaded as artifact)
+- `npm run storage:check` (storage layout pin — fails CI if layout drifts)
+- `npm run docs` (regenerates API docs and fails if they're out of sync)
+- `forge test` (Foundry invariant fuzzing — solvency, conservation, terminal-state stickiness)
 - Slither static analysis via `crytic/slither-action`, with `fail-on: low`
 
 The slither config (`slither.config.json`) suppresses these detectors as documented false positives:

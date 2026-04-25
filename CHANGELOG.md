@@ -38,9 +38,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 - Cancel-agreement bails on null/empty reason (M2 hardening).
 - Agreement IDs parsed as `BigInt` (L4 hardening).
 
+### Tooling
+- **Foundry invariant fuzzing.** Added `test/foundry/Handler.sol` and
+  `ServiceAgreement.invariants.t.sol` with three properties: **solvency**
+  (`balance >= totalObligations`), **conservation**
+  (`pending + open_remaining == totalObligations`), and **terminal-state
+  stickiness** (`cancelled` and `completed` agreements never transition back).
+  Each invariant is checked after 8,192 random call sequences (256 runs × 32
+  depth) covering 10 fuzzable handler operations. CI runs them on every push.
+- **Storage layout snapshot.** `npm run storage` extracts the contract's
+  storage layout from compiler artifacts and writes
+  `docs/storage-layout.json`. CI runs `npm run storage:check` and fails the
+  build on any drift — catches accidental layout breaks on upgrade-unsafe
+  reorderings.
+- **Gas report.** `REPORT_GAS=true` runs the test suite under
+  `hardhat-gas-reporter` and writes `gas-report.txt`. CI uploads it as an
+  artifact alongside coverage.
+
 ### Security
 - Closed all findings from the third adversarial review (3 medium, several lows). 0 critical / 0 high.
-- 101 tests passing, 0 Slither findings.
+- 101 unit tests + 4 invariant tests (8,192 random sequences each) all passing. 0 Slither findings.
 
 ## [0.3.0] — 2026-04-25
 

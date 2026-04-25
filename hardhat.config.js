@@ -2,6 +2,8 @@ require("@nomicfoundation/hardhat-toolbox");
 require("@openzeppelin/hardhat-upgrades");
 require("solidity-docgen");
 
+const REPORT_GAS = process.env.REPORT_GAS === "true";
+
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
@@ -11,7 +13,12 @@ module.exports = {
         enabled: true,
         runs: 200
       },
-      viaIR: true
+      viaIR: true,
+      outputSelection: {
+        "*": {
+          "*": ["abi", "evm.bytecode", "evm.deployedBytecode", "metadata", "storageLayout"]
+        }
+      }
     },
   },
   networks: {
@@ -24,5 +31,12 @@ module.exports = {
     pages: "single",
     exclude: ["test"],
     pageExtension: ".md"
+  },
+  gasReporter: {
+    enabled: REPORT_GAS,
+    currency: "USD",
+    noColors: true,
+    outputFile: REPORT_GAS ? "gas-report.txt" : undefined,
+    excludeContracts: ["MockERC20", "MockTokenWithFee", "EthRefuser"]
   }
 };

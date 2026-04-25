@@ -15,3 +15,12 @@ node_modules
 
 # Hardhat Ignition default folder for deployments against a local node
 ignition/deployments/chain-31337
+
+# Foundry
+/out
+/cache_forge
+/broadcast
+# (lib/ is a Foundry submodule directory; tracked via .gitmodules)
+
+# Gas report (regenerated each run)
+/gas-report.txt

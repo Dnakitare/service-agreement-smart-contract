@@ -1,0 +1,473 @@
+{
+  "target": "contracts/ServiceAgreement.sol:ServiceAgreement",
+  "layout": {
+    "storage": [
+      {
+        "label": "agreementCount",
+        "offset": 0,
+        "slot": "0",
+        "type": "t_uint256",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "_agreements",
+        "offset": 0,
+        "slot": "1",
+        "type": "t_mapping(t_uint256,t_struct(Agreement)3392_storage)",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "_userAgreements",
+        "offset": 0,
+        "slot": "2",
+        "type": "t_mapping(t_address,t_array(t_uint256)dyn_storage)",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "templateCount",
+        "offset": 0,
+        "slot": "3",
+        "type": "t_uint256",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "templates",
+        "offset": 0,
+        "slot": "4",
+        "type": "t_mapping(t_uint256,t_struct(Template)3403_storage)",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "ratings",
+        "offset": 0,
+        "slot": "5",
+        "type": "t_mapping(t_address,t_struct(Rating)3412_storage)",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "whitelistedTokens",
+        "offset": 0,
+        "slot": "6",
+        "type": "t_mapping(t_address,t_bool)",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "feeCollector",
+        "offset": 0,
+        "slot": "7",
+        "type": "t_address",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "_arbitratorList",
+        "offset": 0,
+        "slot": "8",
+        "type": "t_array(t_address)dyn_storage",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "isArbitrator",
+        "offset": 0,
+        "slot": "9",
+        "type": "t_mapping(t_address,t_bool)",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "pendingActions",
+        "offset": 0,
+        "slot": "10",
+        "type": "t_mapping(t_bytes32,t_struct(PendingAction)3421_storage)",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "pendingWithdrawals",
+        "offset": 0,
+        "slot": "11",
+        "type": "t_mapping(t_address,t_mapping(t_address,t_uint256))",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "totalObligations",
+        "offset": 0,
+        "slot": "12",
+        "type": "t_mapping(t_address,t_uint256)",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "upgradeRequestedAt",
+        "offset": 0,
+        "slot": "13",
+        "type": "t_mapping(t_address,t_uint256)",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      },
+      {
+        "label": "__gap",
+        "offset": 0,
+        "slot": "14",
+        "type": "t_array(t_uint256)39_storage",
+        "contract": "contracts/ServiceAgreement.sol:ServiceAgreement"
+      }
+    ],
+    "types": {
+      "t_address": {
+        "encoding": "inplace",
+        "label": "address",
+        "numberOfBytes": "20"
+      },
+      "t_array(t_address)dyn_storage": {
+        "encoding": "dynamic_array",
+        "label": "address[]",
+        "numberOfBytes": "32",
+        "base": "t_address"
+      },
+      "t_array(t_struct(Milestone)3352_storage)dyn_storage": {
+        "encoding": "dynamic_array",
+        "label": "struct ServiceAgreement.Milestone[]",
+        "numberOfBytes": "32",
+        "base": "t_struct(Milestone)3352_storage"
+      },
+      "t_array(t_uint256)39_storage": {
+        "encoding": "inplace",
+        "label": "uint256[39]",
+        "numberOfBytes": "1248",
+        "base": "t_uint256"
+      },
+      "t_array(t_uint256)dyn_storage": {
+        "encoding": "dynamic_array",
+        "label": "uint256[]",
+        "numberOfBytes": "32",
+        "base": "t_uint256"
+      },
+      "t_bool": {
+        "encoding": "inplace",
+        "label": "bool",
+        "numberOfBytes": "1"
+      },
+      "t_bytes32": {
+        "encoding": "inplace",
+        "label": "bytes32",
+        "numberOfBytes": "32"
+      },
+      "t_bytes_storage": {
+        "encoding": "bytes",
+        "label": "bytes",
+        "numberOfBytes": "32"
+      },
+      "t_mapping(t_address,t_array(t_uint256)dyn_storage)": {
+        "encoding": "mapping",
+        "label": "mapping(address => uint256[])",
+        "numberOfBytes": "32",
+        "key": "t_address",
+        "value": "t_array(t_uint256)dyn_storage"
+      },
+      "t_mapping(t_address,t_bool)": {
+        "encoding": "mapping",
+        "label": "mapping(address => bool)",
+        "numberOfBytes": "32",
+        "key": "t_address",
+        "value": "t_bool"
+      },
+      "t_mapping(t_address,t_mapping(t_address,t_uint256))": {
+        "encoding": "mapping",
+        "label": "mapping(address => mapping(address => uint256))",
+        "numberOfBytes": "32",
+        "key": "t_address",
+        "value": "t_mapping(t_address,t_uint256)"
+      },
+      "t_mapping(t_address,t_struct(Rating)3412_storage)": {
+        "encoding": "mapping",
+        "label": "mapping(address => struct ServiceAgreement.Rating)",
+        "numberOfBytes": "32",
+        "key": "t_address",
+        "value": "t_struct(Rating)3412_storage"
+      },
+      "t_mapping(t_address,t_uint256)": {
+        "encoding": "mapping",
+        "label": "mapping(address => uint256)",
+        "numberOfBytes": "32",
+        "key": "t_address",
+        "value": "t_uint256"
+      },
+      "t_mapping(t_bytes32,t_struct(PendingAction)3421_storage)": {
+        "encoding": "mapping",
+        "label": "mapping(bytes32 => struct ServiceAgreement.PendingAction)",
+        "numberOfBytes": "32",
+        "key": "t_bytes32",
+        "value": "t_struct(PendingAction)3421_storage"
+      },
+      "t_mapping(t_uint256,t_struct(Agreement)3392_storage)": {
+        "encoding": "mapping",
+        "label": "mapping(uint256 => struct ServiceAgreement.Agreement)",
+        "numberOfBytes": "32",
+        "key": "t_uint256",
+        "value": "t_struct(Agreement)3392_storage"
+      },
+      "t_mapping(t_uint256,t_struct(Template)3403_storage)": {
+        "encoding": "mapping",
+        "label": "mapping(uint256 => struct ServiceAgreement.Template)",
+        "numberOfBytes": "32",
+        "key": "t_uint256",
+        "value": "t_struct(Template)3403_storage"
+      },
+      "t_string_storage": {
+        "encoding": "bytes",
+        "label": "string",
+        "numberOfBytes": "32"
+      },
+      "t_struct(Agreement)3392_storage": {
+        "encoding": "inplace",
+        "label": "struct ServiceAgreement.Agreement",
+        "numberOfBytes": "320",
+        "members": [
+          {
+            "label": "client",
+            "offset": 0,
+            "slot": "0",
+            "type": "t_address"
+          },
+          {
+            "label": "provider",
+            "offset": 0,
+            "slot": "1",
+            "type": "t_address"
+          },
+          {
+            "label": "totalAmount",
+            "offset": 0,
+            "slot": "2",
+            "type": "t_uint128"
+          },
+          {
+            "label": "remainingAmount",
+            "offset": 16,
+            "slot": "2",
+            "type": "t_uint128"
+          },
+          {
+            "label": "deadline",
+            "offset": 0,
+            "slot": "3",
+            "type": "t_uint64"
+          },
+          {
+            "label": "createdAt",
+            "offset": 8,
+            "slot": "3",
+            "type": "t_uint64"
+          },
+          {
+            "label": "completed",
+            "offset": 16,
+            "slot": "3",
+            "type": "t_bool"
+          },
+          {
+            "label": "disputed",
+            "offset": 17,
+            "slot": "3",
+            "type": "t_bool"
+          },
+          {
+            "label": "cancelled",
+            "offset": 18,
+            "slot": "3",
+            "type": "t_bool"
+          },
+          {
+            "label": "teamApproved",
+            "offset": 19,
+            "slot": "3",
+            "type": "t_bool"
+          },
+          {
+            "label": "paymentToken",
+            "offset": 0,
+            "slot": "4",
+            "type": "t_address"
+          },
+          {
+            "label": "terms",
+            "offset": 0,
+            "slot": "5",
+            "type": "t_string_storage"
+          },
+          {
+            "label": "milestones",
+            "offset": 0,
+            "slot": "6",
+            "type": "t_array(t_struct(Milestone)3352_storage)dyn_storage"
+          },
+          {
+            "label": "teamMembers",
+            "offset": 0,
+            "slot": "7",
+            "type": "t_array(t_address)dyn_storage"
+          },
+          {
+            "label": "teamShares",
+            "offset": 0,
+            "slot": "8",
+            "type": "t_array(t_uint256)dyn_storage"
+          },
+          {
+            "label": "hasRated",
+            "offset": 0,
+            "slot": "9",
+            "type": "t_mapping(t_address,t_bool)"
+          }
+        ]
+      },
+      "t_struct(Milestone)3352_storage": {
+        "encoding": "inplace",
+        "label": "struct ServiceAgreement.Milestone",
+        "numberOfBytes": "64",
+        "members": [
+          {
+            "label": "deadline",
+            "offset": 0,
+            "slot": "0",
+            "type": "t_uint64"
+          },
+          {
+            "label": "amount",
+            "offset": 8,
+            "slot": "0",
+            "type": "t_uint128"
+          },
+          {
+            "label": "completed",
+            "offset": 24,
+            "slot": "0",
+            "type": "t_bool"
+          },
+          {
+            "label": "paid",
+            "offset": 25,
+            "slot": "0",
+            "type": "t_bool"
+          },
+          {
+            "label": "evidenceHash",
+            "offset": 0,
+            "slot": "1",
+            "type": "t_string_storage"
+          }
+        ]
+      },
+      "t_struct(PendingAction)3421_storage": {
+        "encoding": "inplace",
+        "label": "struct ServiceAgreement.PendingAction",
+        "numberOfBytes": "128",
+        "members": [
+          {
+            "label": "actionType",
+            "offset": 0,
+            "slot": "0",
+            "type": "t_bytes32"
+          },
+          {
+            "label": "data",
+            "offset": 0,
+            "slot": "1",
+            "type": "t_bytes_storage"
+          },
+          {
+            "label": "executableAt",
+            "offset": 0,
+            "slot": "2",
+            "type": "t_uint256"
+          },
+          {
+            "label": "executed",
+            "offset": 0,
+            "slot": "3",
+            "type": "t_bool"
+          }
+        ]
+      },
+      "t_struct(Rating)3412_storage": {
+        "encoding": "inplace",
+        "label": "struct ServiceAgreement.Rating",
+        "numberOfBytes": "128",
+        "members": [
+          {
+            "label": "total",
+            "offset": 0,
+            "slot": "0",
+            "type": "t_uint256"
+          },
+          {
+            "label": "count",
+            "offset": 0,
+            "slot": "1",
+            "type": "t_uint256"
+          },
+          {
+            "label": "weightedScore",
+            "offset": 0,
+            "slot": "2",
+            "type": "t_uint256"
+          },
+          {
+            "label": "totalTransactionValue",
+            "offset": 0,
+            "slot": "3",
+            "type": "t_uint256"
+          }
+        ]
+      },
+      "t_struct(Template)3403_storage": {
+        "encoding": "inplace",
+        "label": "struct ServiceAgreement.Template",
+        "numberOfBytes": "160",
+        "members": [
+          {
+            "label": "name",
+            "offset": 0,
+            "slot": "0",
+            "type": "t_string_storage"
+          },
+          {
+            "label": "terms",
+            "offset": 0,
+            "slot": "1",
+            "type": "t_string_storage"
+          },
+          {
+            "label": "recommendedDuration",
+            "offset": 0,
+            "slot": "2",
+            "type": "t_uint256"
+          },
+          {
+            "label": "recommendedMilestones",
+            "offset": 0,
+            "slot": "3",
+            "type": "t_uint256"
+          },
+          {
+            "label": "active",
+            "offset": 0,
+            "slot": "4",
+            "type": "t_bool"
+          }
+        ]
+      },
+      "t_uint128": {
+        "encoding": "inplace",
+        "label": "uint128",
+        "numberOfBytes": "16"
+      },
+      "t_uint256": {
+        "encoding": "inplace",
+        "label": "uint256",
+        "numberOfBytes": "32"
+      },
+      "t_uint64": {
+        "encoding": "inplace",
+        "label": "uint64",
+        "numberOfBytes": "8"
+      }
+    }
+  }
+}
