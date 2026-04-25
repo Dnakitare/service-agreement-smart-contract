@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html, body {
+  background: #0b0b0f;
+  color: #e6e6ea;
+}
+
+body {
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+a {
+  color: #93c5fd;
+}
+a:hover {
+  color: #bfdbfe;
+}
+
+input, select, textarea {
+  background: #14141a;
+  border: 1px solid #2a2a35;
+  color: #e6e6ea;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

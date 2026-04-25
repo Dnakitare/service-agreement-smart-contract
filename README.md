@@ -66,6 +66,8 @@ contracts/
     MockERC20.sol             # standard ERC20 for tests
     MockTokenWithFee.sol      # fee-on-transfer token (used to verify rejection)
     EthRefuser.sol            # contract that refuses ETH; verifies pull-payment isolation
+frontend/                     # reference Next.js dapp (see frontend/README.md)
+  app/, components/, lib/
 docs/
   index.md                    # docs landing (Jekyll home)
   scenarios.md                # end-to-end walkthroughs
