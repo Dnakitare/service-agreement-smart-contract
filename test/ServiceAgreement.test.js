@@ -1247,6 +1247,143 @@ describe("ServiceAgreement", function () {
   });
 
   // ----------------------------------------------------------------------------
+  // Second-round hardening: dispute freezes state, deadline sync
+  // ----------------------------------------------------------------------------
+
+  describe("Frozen state during dispute", () => {
+    let agreementId;
+    const total = ethers.parseEther("1");
+
+    beforeEach(async () => {
+      const dueDates = await futureTimes(86400, 172800);
+      await serviceAgreement.connect(client).createAgreementFromTemplate(
+        0, provider.address, dueDates,
+        [ethers.parseEther("0.5"), ethers.parseEther("0.5")],
+        ZERO, { value: total }
+      );
+      agreementId = 0;
+      // Client raises dispute (allowed at any time).
+      await serviceAgreement.connect(client).raiseDispute(agreementId, "x");
+    });
+
+    it("blocks proposeTeam during dispute", async () => {
+      await expect(
+        serviceAgreement.connect(provider).proposeTeam(
+          agreementId, [addrs[0].address], [10000]
+        )
+      ).to.be.revertedWithCustomError(serviceAgreement, "AgreementClosed");
+    });
+
+    it("blocks approveTeam during dispute", async () => {
+      // Reset: create a new agreement, propose a team, then dispute, then try to approve.
+      const dueDates = await futureTimes(86400, 172800);
+      await serviceAgreement.connect(client).createAgreementFromTemplate(
+        0, provider.address, dueDates,
+        [ethers.parseEther("0.5"), ethers.parseEther("0.5")],
+        ZERO, { value: total }
+      );
+      const id = 1;
+      await serviceAgreement.connect(provider).proposeTeam(
+        id, [addrs[0].address], [10000]
+      );
+      await serviceAgreement.connect(client).raiseDispute(id, "x");
+      await expect(
+        serviceAgreement.connect(client).approveTeam(id)
+      ).to.be.revertedWithCustomError(serviceAgreement, "AgreementClosed");
+    });
+
+    it("blocks submitMilestoneEvidence during dispute", async () => {
+      await expect(
+        serviceAgreement.connect(provider).submitMilestoneEvidence(agreementId, 0, "Q")
+      ).to.be.revertedWithCustomError(serviceAgreement, "AgreementClosed");
+    });
+
+    it("blocks extendMilestoneDeadline during dispute", async () => {
+      const t = await chainNow();
+      await expect(
+        serviceAgreement.connect(client).extendMilestoneDeadline(agreementId, 0, t + 5 * 86400)
+      ).to.be.revertedWithCustomError(serviceAgreement, "AgreementClosed");
+    });
+  });
+
+  describe("Deadline sync on extension (M-1 hardening)", () => {
+    it("extending the last milestone updates agreement.deadline", async () => {
+      const dueDates = await futureTimes(86400, 172800);
+      await serviceAgreement.connect(client).createAgreementFromTemplate(
+        0, provider.address, dueDates,
+        [ethers.parseEther("0.5"), ethers.parseEther("0.5")],
+        ZERO, { value: ethers.parseEther("1") }
+      );
+
+      const before = await serviceAgreement.getAgreementDetails(0);
+      expect(before.deadline).to.equal(dueDates[1]);
+
+      const t = await chainNow();
+      const newDeadline = t + 30 * 86400;
+      await serviceAgreement.connect(client).extendMilestoneDeadline(0, 1, newDeadline);
+
+      const after = await serviceAgreement.getAgreementDetails(0);
+      expect(after.deadline).to.equal(newDeadline);
+    });
+
+    it("extending an EARLIER milestone (not past agreement.deadline) does NOT change agreement.deadline", async () => {
+      const dueDates = await futureTimes(86400, 200 * 86400);
+      await serviceAgreement.connect(client).createAgreementFromTemplate(
+        0, provider.address, dueDates,
+        [ethers.parseEther("0.5"), ethers.parseEther("0.5")],
+        ZERO, { value: ethers.parseEther("1") }
+      );
+
+      const t = await chainNow();
+      // Extend milestone 0 to t + 5d, still well below agreement.deadline (~200d).
+      await serviceAgreement.connect(client).extendMilestoneDeadline(0, 0, t + 5 * 86400);
+
+      const a = await serviceAgreement.getAgreementDetails(0);
+      expect(a.deadline).to.equal(dueDates[1]);
+    });
+
+    it("provider CANNOT dispute prematurely after client extends past original deadline", async () => {
+      // Original final deadline: t + 1 day.
+      const dueDates = await futureTimes(86400);
+      await serviceAgreement.connect(client).createAgreementFromTemplate(
+        0, provider.address, dueDates,
+        [ethers.parseEther("1")], ZERO,
+        { value: ethers.parseEther("1") }
+      );
+
+      // Client extends to t + 30 days as a courtesy.
+      const t = await chainNow();
+      await serviceAgreement.connect(client).extendMilestoneDeadline(0, 0, t + 30 * 86400);
+
+      // Move past the ORIGINAL deadline but still well before the new one.
+      await time.increase(2 * 86400);
+
+      // Provider trying to dispute should fail (new deadline now governs).
+      await expect(
+        serviceAgreement.connect(provider).raiseDispute(0, "premature")
+      ).to.be.revertedWithCustomError(serviceAgreement, "NoDisputeGrounds");
+    });
+  });
+
+  describe("Arbitrator pool cap", () => {
+    it("rejects pools larger than MAX_ARBITRATORS", async () => {
+      const pool = Array(11).fill(0).map((_, i) => addrs[i].address);
+      const data = ethers.AbiCoder.defaultAbiCoder().encode(["address[]"], [pool]);
+      const tx = await serviceAgreement.connect(owner).scheduleAction(
+        await serviceAgreement.ACTION_SET_ARBITRATOR_POOL(),
+        data
+      );
+      const receipt = await tx.wait();
+      const actionId = receipt.logs
+        .map((l) => { try { return serviceAgreement.interface.parseLog(l); } catch { return null; } })
+        .find((p) => p && p.name === "ActionScheduled").args.actionId;
+      await time.increase(TIMELOCK + 1);
+      await expect(serviceAgreement.connect(owner).executeAction(actionId))
+        .to.be.revertedWithCustomError(serviceAgreement, "TooManyArbitrators");
+    });
+  });
+
+  // ----------------------------------------------------------------------------
   // Pause
   // ----------------------------------------------------------------------------
 

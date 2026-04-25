@@ -74,6 +74,8 @@ contract ServiceAgreement is
     error TeamNotApproved();
     error NoDisputeGrounds();
     error UpgradeNotRequested();
+    error ActionAlreadyScheduled();
+    error TooManyArbitrators();
 
     // ============ Constants ============
 
@@ -86,6 +88,7 @@ contract ServiceAgreement is
     uint256 public constant CANCELLATION_WINDOW = 24 hours;
     uint256 public constant TIMELOCK_DELAY = 2 days;
     uint256 public constant MAX_TEAM_MEMBERS = 10;
+    uint256 public constant MAX_ARBITRATORS = 10;
 
     // Action type identifiers for the timelock queue.
     bytes32 public constant ACTION_SET_ARBITRATOR_POOL = keccak256("SET_ARBITRATOR_POOL");
@@ -258,6 +261,14 @@ contract ServiceAgreement is
         _;
     }
 
+    /// @dev Used to freeze cooperative state changes (team proposals, evidence,
+    /// deadline edits) once a dispute is raised. Resolution is the only path
+    /// out from a disputed state.
+    modifier notDisputed(uint256 agreementId) {
+        if (_agreements[agreementId].disputed) revert AgreementClosed();
+        _;
+    }
+
     // ============ Initializer ============
 
     /// @custom:oz-upgrades-unsafe-allow constructor
@@ -332,7 +343,7 @@ contract ServiceAgreement is
 
         actionId = keccak256(abi.encodePacked(actionType, data, block.timestamp, block.number));
         // Collisions only occur with same data in the same tx; revert to surface.
-        if (pendingActions[actionId].executableAt != 0) revert ActionAlreadyExecuted();
+        if (pendingActions[actionId].executableAt != 0) revert ActionAlreadyScheduled();
 
         uint256 executableAt = block.timestamp + TIMELOCK_DELAY;
         pendingActions[actionId] = PendingAction({
@@ -385,6 +396,7 @@ contract ServiceAgreement is
 
     function _setArbitratorPool(address[] memory newPool) internal {
         if (newPool.length == 0) revert InvalidArrayLength();
+        if (newPool.length > MAX_ARBITRATORS) revert TooManyArbitrators();
 
         // Clear old pool.
         uint256 oldLen = _arbitratorList.length;
@@ -569,7 +581,7 @@ contract ServiceAgreement is
         uint256 agreementId,
         address[] calldata members,
         uint256[] calldata shares
-    ) external validAgreement(agreementId) onlyProvider(agreementId) active(agreementId) whenNotPaused {
+    ) external validAgreement(agreementId) onlyProvider(agreementId) active(agreementId) notDisputed(agreementId) whenNotPaused {
         Agreement storage agreement = _agreements[agreementId];
         if (agreement.teamApproved) revert TeamAlreadySet();
 
@@ -605,6 +617,7 @@ contract ServiceAgreement is
         validAgreement(agreementId)
         onlyClient(agreementId)
         active(agreementId)
+        notDisputed(agreementId)
         whenNotPaused
     {
         Agreement storage agreement = _agreements[agreementId];
@@ -621,7 +634,7 @@ contract ServiceAgreement is
         uint256 agreementId,
         uint256 milestoneIndex,
         string calldata evidenceHash
-    ) external validAgreement(agreementId) onlyProvider(agreementId) active(agreementId) whenNotPaused {
+    ) external validAgreement(agreementId) onlyProvider(agreementId) active(agreementId) notDisputed(agreementId) whenNotPaused {
         if (bytes(evidenceHash).length == 0) revert EvidenceEmpty();
 
         Agreement storage agreement = _agreements[agreementId];
@@ -639,6 +652,7 @@ contract ServiceAgreement is
         validAgreement(agreementId)
         onlyClient(agreementId)
         active(agreementId)
+        notDisputed(agreementId)
         whenNotPaused
     {
         Agreement storage agreement = _agreements[agreementId];
@@ -650,6 +664,11 @@ contract ServiceAgreement is
         if (newDeadline > block.timestamp + MAX_DEADLINE) revert DurationTooLong();
 
         m.deadline = uint64(newDeadline);
+        // Keep agreement.deadline in sync so the provider's dispute window
+        // (block.timestamp > agreement.deadline) reflects the latest extension.
+        if (newDeadline > agreement.deadline) {
+            agreement.deadline = uint64(newDeadline);
+        }
         emit MilestoneDeadlineExtended(agreementId, milestoneIndex, newDeadline);
     }
 
@@ -662,11 +681,11 @@ contract ServiceAgreement is
         validAgreement(agreementId)
         onlyClient(agreementId)
         active(agreementId)
+        notDisputed(agreementId)
         whenNotPaused
         nonReentrant
     {
         Agreement storage agreement = _agreements[agreementId];
-        if (agreement.disputed) revert AgreementClosed();
         if (milestoneIndex >= agreement.milestones.length) revert MilestoneIndexOutOfBounds();
 
         Milestone storage m = agreement.milestones[milestoneIndex];
@@ -695,13 +714,13 @@ contract ServiceAgreement is
         validAgreement(agreementId)
         onlyClient(agreementId)
         active(agreementId)
+        notDisputed(agreementId)
         whenNotPaused
         nonReentrant
     {
         if (milestoneIndices.length == 0) revert InvalidArrayLength();
 
         Agreement storage agreement = _agreements[agreementId];
-        if (agreement.disputed) revert AgreementClosed();
 
         uint256 totalAmount;
         uint256 totalFee;
@@ -755,11 +774,11 @@ contract ServiceAgreement is
         validAgreement(agreementId)
         onlyClient(agreementId)
         active(agreementId)
+        notDisputed(agreementId)
         whenNotPaused
         nonReentrant
     {
         Agreement storage agreement = _agreements[agreementId];
-        if (agreement.disputed) revert AgreementClosed();
         if (block.timestamp > agreement.createdAt + CANCELLATION_WINDOW) revert CancellationWindowExpired();
 
         // Disallow cancellation after any milestone has been paid out.
