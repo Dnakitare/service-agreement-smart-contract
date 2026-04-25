@@ -1,133 +1,96 @@
-# Service Agreement Smart Contract
+# ServiceAgreement
 
-A comprehensive decentralized service agreement platform built on Ethereum that enables secure, milestone-based service agreements between clients and service providers.
+A milestone-based escrow contract for service agreements between a client and a provider, written in Solidity 0.8.28 and deployed behind a UUPS proxy.
 
-## Features
+## What it does
 
-- **Milestone-based Agreements**: Create and manage service agreements with granular milestone management
-- **Multi-token Support**: Accept payments in ETH or any whitelisted ERC20 token
-- **Team Collaboration**: Distribute payments among multiple team members with custom share allocation
-- **Advanced Dispute Resolution**: Multi-level arbitration system with escalation
-- **Partial Completion**: Support for partial milestone completion and proportional payments
-- **Slippage Protection**: Built-in protection against fee-on-transfer tokens
-- **Timelock Security**: Critical admin actions require timelock delays
-- **Upgradeable Design**: UUPS proxy pattern for future upgrades
-- **Rating System**: Reputation system weighted by transaction values
+A client funds an agreement up front (in ETH or a whitelisted ERC20). The funds are escrowed milestone-by-milestone. The provider submits evidence for each milestone; the client signs off; payment is then claimable by the provider. A platform fee (default 1%) is taken at release time and credited to the fee collector.
 
-## Contract Architecture
+If the parties disagree, either may raise a dispute. An arbitrator from the configured pool resolves it by deciding how much of the *remaining* escrow goes to the provider; the rest is refunded to the client.
 
-The ServiceAgreement contract uses the UUPS (Universal Upgradeable Proxy Standard) pattern for upgradeability, allowing for future enhancements while preserving state and contract address.
+The provider may optionally split payments across a team (up to 10 members) by basis-point shares.
 
-### Core Components
+## Design properties
 
-- **Agreement**: Central data structure for service agreements containing all agreement details
-- **Milestone**: Deliverable with deadline, payment amount, and completion evidence
-- **Template**: Reusable agreement templates for standard service types
-- **Rating**: User reputation system with transaction-weighted scores
-- **Batch Operations**: Gas-efficient methods for processing multiple milestones
-- **Team Payments**: Distribute payments among team members by percentage
+The contract is built around four properties that the test suite enforces:
 
-### Security Features
+1. **Pull payments** — `releaseMilestonePayment`, `resolveDispute`, `cancelAgreement` and `addTeamMembers` never push ETH or tokens. They credit `pendingWithdrawals[token][recipient]`. Recipients call `withdraw(token)` to claim. A single bad recipient (e.g. a contract that reverts on ETH receive) cannot block any other recipient.
 
-- **Reentrancy Protection**: Guards against reentrancy attacks
-- **Access Control**: Role-based access control for all sensitive functions
-- **Timelock**: Mandatory delay for critical admin functions
-- **Slippage Protection**: Protection against token transfer fees or deductions
-- **Validation**: Comprehensive input validation with custom errors
+2. **Real timelock** — every privileged config change (rotating the arbitrator pool, changing the fee collector, whitelisting/removing a token) goes through `scheduleAction → executeAction` with a 2-day delay. There is no immediate-execute bypass. The owner cannot whitelist a token and use it in the same block.
 
-## Development
+3. **Solvency invariant** — for every accepted token, the contract maintains `balance(token) >= totalObligations[token]` at all times. `withdrawSurplus` can only ever transfer the strict surplus above obligations. There is no `emergencyWithdraw` that drains escrow.
 
-### Prerequisites
+4. **No fee-on-transfer / rebasing tokens** — `_pullToken` checks that the contract received exactly the requested amount and reverts with `FeeOnTransferNotSupported` otherwise. This keeps the solvency invariant exact and reflects the assumption that whitelisted tokens are standard ERC20s.
 
-- Node.js v16+
-- npm or yarn
-- Hardhat
+## Lifecycle
 
-### Installation
+```
+                          ┌─ submitMilestoneEvidence ──┐
+client funds agreement ──>│                            ├──> client.completeMilestone
+                          └────────────────────────────┘            │
+                                                                    ▼
+                                                      client.releaseMilestonePayment
+                                                                    │
+                                            credits pendingWithdrawals[token][provider]
+                                            credits pendingWithdrawals[token][feeCollector]
+                                                                    │
+                                          provider.withdraw(token), feeCollector.withdraw(token)
+```
+
+Either party may call `raiseDispute` at any time before the agreement is completed or cancelled. The arbitrator then calls `resolveDispute(agreementId, amountToProvider)` to split the remaining escrow.
+
+The client may `cancelAgreement` within 24 hours of creation, but only if no milestone has been paid and no dispute is active. The full remaining balance is credited back to the client.
+
+## Layout
+
+```
+contracts/
+  ServiceAgreement.sol        # the contract
+  test/
+    MockERC20.sol             # standard ERC20 for tests
+    MockTokenWithFee.sol      # fee-on-transfer token (used to verify rejection)
+    EthRefuser.sol            # contract that refuses ETH; verifies pull-payment isolation
+scripts/
+  deploy.js                   # deploys proxy + schedules privileged config
+  upgrade.js                  # upgrades the implementation behind the proxy
+  verify.js                   # Etherscan verification helper
+test/
+  ServiceAgreement.test.js    # 61 tests: happy paths + adversarial cases
+hardhat.config.js
+```
+
+## Develop
 
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/service-agreement.git
-cd service-agreement
-
-# Install dependencies
 npm install
+npm run compile
+npm test
 ```
 
-### Testing
+## Deploy
+
+Set the addresses you want to use, then run the deploy script. The script schedules timelocked actions; you must call `executeAction(actionId)` for each after `TIMELOCK_DELAY` (2 days) has elapsed.
 
 ```bash
-# Run tests
-npx hardhat test
-
-# Run coverage
-npx hardhat coverage
-```
-
-### Deployment
-
-```bash
-# Deploy to local hardhat network
-npx hardhat run scripts/deploy.js
-
-# Deploy to testnet
+ARBITRATOR=0x... \
+FEE_COLLECTOR=0x... \
+ARBITRATOR_POOL=0x...,0x... \
+WHITELIST_TOKENS=0x... \
 npx hardhat run scripts/deploy.js --network sepolia
-
-# Upgrade an existing contract
-PROXY_ADDRESS=0xYourProxyAddress npx hardhat run scripts/upgrade.js --network sepolia
-
-# Verify contract on Etherscan
-IMPLEMENTATION_ADDRESS=0xYourImplementationAddress npx hardhat run scripts/verify.js --network sepolia
 ```
 
-## Usage Guide
-
-### Creating an Agreement
-
-1. **Select a Template**: Choose from pre-defined agreement templates
-2. **Define Milestones**: Set up milestones with deadlines and payment amounts
-3. **Fund the Agreement**: Deposit ETH or approved ERC20 tokens
-4. **Add Team Members** (optional): Provider can add team members with payment shares
-5. **Execute the Work**: Provider submits evidence of milestone completion
-6. **Approve and Release Payments**: Client approves completion and releases payment
-
-### Dispute Resolution Process
-
-If there's a disagreement between client and provider:
-
-1. **Raise a Dispute**: Either party can raise a dispute with evidence
-2. **Arbitration**: Designated arbitrator reviews the evidence and resolves the dispute
-3. **Escalation** (if needed): Dispute can be escalated to higher-level arbitrators
-4. **Resolution**: Funds are distributed according to the arbitrator's decision
-
-### Ratings and Reputation
-
-After completing an agreement:
-1. Client can rate the provider
-2. Provider can rate the client
-3. Ratings are weighted by transaction value
-4. Ratings contribute to participants' overall reputation scores
-
-## Administration
-
-### Token Management
+To upgrade an existing proxy:
 
 ```bash
-# Whitelist a token (by admin)
-# Note: Subject to timelock delay
-npx hardhat run scripts/whitelist-token.js --token 0xTokenAddress --network sepolia
-
-# Set token slippage tolerance (by admin)
-# Note: Subject to timelock delay
-npx hardhat run scripts/set-token-slippage.js --token 0xTokenAddress --slippage 50 --network sepolia
+PROXY_ADDRESS=0x... npx hardhat run scripts/upgrade.js --network sepolia
 ```
 
-### Arbitrator Management
+## Operational notes
 
-```bash
-# Set arbitrator pool (by admin)
-npx hardhat run scripts/set-arbitrator-pool.js --arbitrators 0xAddr1,0xAddr2,0xAddr3 --network sepolia
-```
+- Whitelist only standard ERC20 tokens. Rebasing tokens, fee-on-transfer tokens, and tokens with non-standard `transfer` semantics are not supported and will revert at deposit time.
+- The owner key controls the timelock queue and the upgrade path. Use a multisig for production.
+- The arbitrator pool is the only role authorized to resolve disputes. Pool rotations are themselves timelocked.
+- `withdrawSurplus` is for accidental transfers — never for escrowed funds. The contract's solvency invariant guarantees it can never decrement obligations.
 
 ## License
 
