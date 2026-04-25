@@ -1,0 +1,7 @@
+{
+  "filter_paths": "node_modules|contracts/test",
+  "exclude_informational": true,
+  "exclude_low": false,
+  "exclude_optimization": false,
+  "detectors_to_exclude": "naming-convention,solc-version,similar-names,uninitialized-local,timestamp,cyclomatic-complexity,unused-state"
+}

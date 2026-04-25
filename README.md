@@ -91,6 +91,26 @@ To upgrade an existing proxy:
 PROXY_ADDRESS=0x... npx hardhat run scripts/upgrade.js --network sepolia
 ```
 
+## Continuous integration
+
+GitHub Actions (`.github/workflows/ci.yml`) runs on every push and PR:
+
+- `npm test` (Hardhat test suite)
+- `npm run coverage` (solidity-coverage; report uploaded as artifact)
+- Slither static analysis via `crytic/slither-action`, with `fail-on: low`
+
+The slither config (`slither.config.json`) suppresses these detectors as documented false positives:
+
+| Detector | Reason for suppression |
+|---|---|
+| `timestamp` | All `block.timestamp` comparisons here are intentional (timelocks, deadlines, cancellation window). Modern PoS bounds drift to a few seconds; not exploitable for the scales used. |
+| `uninitialized-local` | Solidity 0.8 zero-initializes uints. Style-only. |
+| `cyclomatic-complexity` | `_createAgreement` performs validation that's a single logical step but counts as many branches. |
+| `unused-state` | `__gap` is intentionally unused — that is its purpose for upgradeability. |
+| `naming-convention`, `solc-version`, `similar-names` | Style-only. |
+
+Any *new* slither finding (any severity ≥ low not in the suppression list) fails CI.
+
 ## Operational notes
 
 - Whitelist only standard ERC20 tokens. Rebasing tokens, fee-on-transfer tokens, and tokens with non-standard `transfer` semantics are not supported and will revert at deposit time.
