@@ -932,6 +932,231 @@ describe("ServiceAgreement", function () {
   });
 
   // ----------------------------------------------------------------------------
+  // Additional timelock paths
+  // ----------------------------------------------------------------------------
+
+  describe("Timelock: fee collector + token removal", () => {
+    it("rotates the fee collector through the timelock", async () => {
+      const newCollector = addrs[8].address;
+      await scheduleAndExecute(
+        serviceAgreement,
+        owner,
+        await serviceAgreement.ACTION_SET_FEE_COLLECTOR(),
+        ethers.AbiCoder.defaultAbiCoder().encode(["address"], [newCollector])
+      );
+      expect(await serviceAgreement.feeCollector()).to.equal(newCollector);
+    });
+
+    it("rejects zero address as fee collector at execution time", async () => {
+      const data = ethers.AbiCoder.defaultAbiCoder().encode(["address"], [ZERO]);
+      const tx = await serviceAgreement.connect(owner).scheduleAction(
+        await serviceAgreement.ACTION_SET_FEE_COLLECTOR(),
+        data
+      );
+      const receipt = await tx.wait();
+      const actionId = receipt.logs
+        .map((l) => { try { return serviceAgreement.interface.parseLog(l); } catch { return null; } })
+        .find((p) => p && p.name === "ActionScheduled").args.actionId;
+      await time.increase(TIMELOCK + 1);
+      await expect(serviceAgreement.connect(owner).executeAction(actionId))
+        .to.be.revertedWithCustomError(serviceAgreement, "ZeroAddress");
+    });
+
+    it("removes a token from the whitelist via timelock", async () => {
+      const tokenAddr = await mockToken.getAddress();
+      expect(await serviceAgreement.whitelistedTokens(tokenAddr)).to.be.true;
+
+      await scheduleAndExecute(
+        serviceAgreement,
+        owner,
+        await serviceAgreement.ACTION_REMOVE_TOKEN(),
+        ethers.AbiCoder.defaultAbiCoder().encode(["address"], [tokenAddr])
+      );
+      expect(await serviceAgreement.whitelistedTokens(tokenAddr)).to.be.false;
+
+      // New agreements using the now-removed token must fail.
+      const dueDates = await futureTimes(86400);
+      await expect(
+        serviceAgreement.connect(client).createAgreementFromTemplate(
+          0, provider.address, dueDates, [ethers.parseEther("1")], tokenAddr
+        )
+      ).to.be.revertedWithCustomError(serviceAgreement, "TokenNotWhitelisted");
+    });
+
+    it("empty arbitrator pool reverts at execution time", async () => {
+      const data = ethers.AbiCoder.defaultAbiCoder().encode(["address[]"], [[]]);
+      const tx = await serviceAgreement.connect(owner).scheduleAction(
+        await serviceAgreement.ACTION_SET_ARBITRATOR_POOL(),
+        data
+      );
+      const receipt = await tx.wait();
+      const actionId = receipt.logs
+        .map((l) => { try { return serviceAgreement.interface.parseLog(l); } catch { return null; } })
+        .find((p) => p && p.name === "ActionScheduled").args.actionId;
+      await time.increase(TIMELOCK + 1);
+      await expect(serviceAgreement.connect(owner).executeAction(actionId))
+        .to.be.revertedWithCustomError(serviceAgreement, "InvalidArrayLength");
+    });
+
+    it("arbitrator pool dedupes repeated addresses", async () => {
+      const pool = [otherArb.address, otherArb.address, addrs[0].address];
+      await scheduleAndExecute(
+        serviceAgreement,
+        owner,
+        await serviceAgreement.ACTION_SET_ARBITRATOR_POOL(),
+        ethers.AbiCoder.defaultAbiCoder().encode(["address[]"], [pool])
+      );
+      expect(await serviceAgreement.arbitratorCount()).to.equal(2);
+      expect(await serviceAgreement.isArbitrator(otherArb.address)).to.be.true;
+      expect(await serviceAgreement.isArbitrator(addrs[0].address)).to.be.true;
+    });
+
+    it("rejects zero address inside arbitrator pool", async () => {
+      const pool = [otherArb.address, ZERO];
+      const data = ethers.AbiCoder.defaultAbiCoder().encode(["address[]"], [pool]);
+      const tx = await serviceAgreement.connect(owner).scheduleAction(
+        await serviceAgreement.ACTION_SET_ARBITRATOR_POOL(),
+        data
+      );
+      const receipt = await tx.wait();
+      const actionId = receipt.logs
+        .map((l) => { try { return serviceAgreement.interface.parseLog(l); } catch { return null; } })
+        .find((p) => p && p.name === "ActionScheduled").args.actionId;
+      await time.increase(TIMELOCK + 1);
+      await expect(serviceAgreement.connect(owner).executeAction(actionId))
+        .to.be.revertedWithCustomError(serviceAgreement, "ZeroAddress");
+    });
+  });
+
+  // ----------------------------------------------------------------------------
+  // ERC20 pull payments and surplus
+  // ----------------------------------------------------------------------------
+
+  describe("ERC20 withdraw + surplus", () => {
+    it("withdraws ERC20 credits", async () => {
+      const tokenAddr = await mockToken.getAddress();
+      const dueDates = await futureTimes(86400);
+      await serviceAgreement.connect(client).createAgreementFromTemplate(
+        0, provider.address, dueDates, [ethers.parseEther("1")], tokenAddr
+      );
+      await serviceAgreement.connect(provider).submitMilestoneEvidence(0, 0, "Q");
+      await serviceAgreement.connect(client).completeMilestone(0, 0);
+      await serviceAgreement.connect(client).releaseMilestonePayment(0, 0);
+
+      const fee = (ethers.parseEther("1") * FEE_BPS) / BPS;
+      const net = ethers.parseEther("1") - fee;
+
+      const before = await mockToken.balanceOf(provider.address);
+      await serviceAgreement.connect(provider).withdraw(tokenAddr);
+      const after = await mockToken.balanceOf(provider.address);
+      expect(after - before).to.equal(net);
+
+      expect(await serviceAgreement.pendingWithdrawals(tokenAddr, provider.address)).to.equal(0);
+    });
+
+    it("surplus-withdraws accidentally-sent ERC20 tokens", async () => {
+      const tokenAddr = await mockToken.getAddress();
+      // Seed an agreement to create some obligations.
+      const dueDates = await futureTimes(86400);
+      await serviceAgreement.connect(client).createAgreementFromTemplate(
+        0, provider.address, dueDates, [ethers.parseEther("1")], tokenAddr
+      );
+
+      // Transfer extra tokens directly to the contract (accidental).
+      await mockToken.mint(owner.address, ethers.parseEther("5"));
+      await mockToken.transfer(await serviceAgreement.getAddress(), ethers.parseEther("5"));
+
+      const recipient = addrs[9].address;
+      const before = await mockToken.balanceOf(recipient);
+      await serviceAgreement.connect(owner).withdrawSurplus(tokenAddr, recipient);
+      const after = await mockToken.balanceOf(recipient);
+      expect(after - before).to.equal(ethers.parseEther("5"));
+    });
+
+    it("rejects zero-address recipient for surplus withdraw", async () => {
+      await expect(
+        serviceAgreement.connect(owner).withdrawSurplus(ZERO, ZERO)
+      ).to.be.revertedWithCustomError(serviceAgreement, "ZeroAddress");
+    });
+  });
+
+  // ----------------------------------------------------------------------------
+  // Upgrade path
+  // ----------------------------------------------------------------------------
+
+  describe("Upgrade", () => {
+    it("owner can upgrade the implementation", async () => {
+      const ServiceAgreement = await ethers.getContractFactory("ServiceAgreement");
+      const before = await upgrades.erc1967.getImplementationAddress(await serviceAgreement.getAddress());
+      await upgrades.upgradeProxy(await serviceAgreement.getAddress(), ServiceAgreement);
+      const after = await upgrades.erc1967.getImplementationAddress(await serviceAgreement.getAddress());
+      // State survives: arbitrator still seeded.
+      expect(await serviceAgreement.isArbitrator(arbitrator.address)).to.be.true;
+      // Implementation address may differ (new deployment) or match (idempotent) — either is fine.
+      expect(typeof before).to.equal("string");
+      expect(typeof after).to.equal("string");
+    });
+
+    it("non-owner cannot upgrade", async () => {
+      const ServiceAgreement = await ethers.getContractFactory("ServiceAgreement", client);
+      await expect(
+        upgrades.upgradeProxy(await serviceAgreement.getAddress(), ServiceAgreement)
+      ).to.be.reverted;
+    });
+  });
+
+  // ----------------------------------------------------------------------------
+  // Views
+  // ----------------------------------------------------------------------------
+
+  describe("Views", () => {
+    let agreementId;
+    const amounts = [ethers.parseEther("0.4"), ethers.parseEther("0.6")];
+
+    beforeEach(async () => {
+      const dueDates = await futureTimes(86400, 172800);
+      await serviceAgreement.connect(client).createAgreementFromTemplate(
+        0, provider.address, dueDates, amounts, ZERO, { value: ethers.parseEther("1") }
+      );
+      agreementId = 0;
+    });
+
+    it("getMilestoneCount + getMilestone + getMilestones", async () => {
+      expect(await serviceAgreement.getMilestoneCount(agreementId)).to.equal(2);
+
+      const m0 = await serviceAgreement.getMilestone(agreementId, 0);
+      expect(m0.amount).to.equal(amounts[0]);
+      expect(m0.completed).to.be.false;
+
+      const all = await serviceAgreement.getMilestones(agreementId);
+      expect(all.length).to.equal(2);
+      expect(all[1].amount).to.equal(amounts[1]);
+    });
+
+    it("getMilestone reverts on bad index", async () => {
+      await expect(
+        serviceAgreement.getMilestone(agreementId, 5)
+      ).to.be.revertedWithCustomError(serviceAgreement, "MilestoneIndexOutOfBounds");
+    });
+
+    it("getTeam + getUserAgreements + hasRated", async () => {
+      const [members, shares] = await serviceAgreement.getTeam(agreementId);
+      expect(members.length).to.equal(0);
+      expect(shares.length).to.equal(0);
+
+      const userAgreements = await serviceAgreement.getUserAgreements(client.address);
+      expect(userAgreements.map((n) => Number(n))).to.deep.equal([agreementId]);
+
+      expect(await serviceAgreement.hasRated(agreementId, client.address)).to.be.false;
+    });
+
+    it("arbitratorPool view returns current pool", async () => {
+      const pool = await serviceAgreement.arbitratorPool();
+      expect(pool).to.deep.equal([arbitrator.address]);
+    });
+  });
+
+  // ----------------------------------------------------------------------------
   // Pause
   // ----------------------------------------------------------------------------
 
@@ -958,6 +1183,18 @@ describe("ServiceAgreement", function () {
 
       // But pending withdrawals still work — funds remain claimable.
       await expect(serviceAgreement.connect(provider).withdraw(ZERO)).to.not.be.reverted;
+    });
+
+    it("owner can unpause", async () => {
+      await serviceAgreement.connect(owner).pause();
+      await serviceAgreement.connect(owner).unpause();
+      const dueDates = await futureTimes(86400);
+      await expect(
+        serviceAgreement.connect(client).createAgreementFromTemplate(
+          0, provider.address, dueDates, [ethers.parseEther("1")], ZERO,
+          { value: ethers.parseEther("1") }
+        )
+      ).to.not.be.reverted;
     });
   });
 });
